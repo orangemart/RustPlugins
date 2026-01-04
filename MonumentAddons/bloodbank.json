@@ -1,0 +1,79 @@
+{
+  "Name": "bloodbank",
+  "Author": "ORANGEMART",
+  "SchemaVersion": 2.0,
+  "MonumentData": {
+    "bandit_town": {
+      "Entities": [
+        {
+          "Id": "34cd595b-2db2-41b2-bfee-ffdbfb9e7dea",
+          "PrefabName": "assets/prefabs/deployable/large wood storage/box.wooden.large.prefab",
+          "Position": {
+            "x": 35.0332336,
+            "y": 1.68378639,
+            "z": -8.18250751
+          },
+          "RotationAngles": {
+            "x": 0.0,
+            "y": 258.11142,
+            "z": 0.0
+          },
+          "Skin": 3616815672
+        }
+      ],
+      "Pastes": [
+        {
+          "Id": "3e48138e-e2ee-4188-b984-3d34278b2a61",
+          "Position": {
+            "x": 35.5235672,
+            "y": 0.75,
+            "z": -8.078136
+          },
+          "RotationAngles": {
+            "x": 0.0,
+            "y": 81.20822,
+            "z": 0.0
+          },
+          "Filename": "bloodbank",
+          "Args": []
+        }
+      ]
+    },
+    "compound": {
+      "Entities": [
+        {
+          "Id": "223e2192-bded-461e-8463-8e12adf822e4",
+          "PrefabName": "assets/prefabs/deployable/large wood storage/box.wooden.large.prefab",
+          "Position": {
+            "x": -28.5367126,
+            "y": 0.53338623,
+            "z": 36.38285
+          },
+          "RotationAngles": {
+            "x": 0.0,
+            "y": 84.65065,
+            "z": 0.0
+          },
+          "Skin": 3616815672
+        }
+      ],
+      "Pastes": [
+        {
+          "Id": "7b89b9de-51ff-4cc1-9a0d-2b0670b04601",
+          "Position": {
+            "x": -29.1728439,
+            "y": 0.249996185,
+            "z": 36.256
+          },
+          "RotationAngles": {
+            "x": 0.0,
+            "y": 267.0111,
+            "z": 0.0
+          },
+          "Filename": "bloodbank",
+          "Args": []
+        }
+      ]
+    }
+  }
+}
