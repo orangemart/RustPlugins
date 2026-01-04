@@ -15,10 +15,22 @@ This plugin replaces the standalone **DepositBox** and **UpdateLeaderboard** plu
 
 ---
 
+## Dependencies & Integrations
+
+### Required
+- **[ServerInfo](https://umod.org/plugins/server-info):** This plugin is required to visualize the leaderboard UI in-game.
+
+### Optional / Recommended
+- **[MonumentAddons](https://umod.org/plugins/monument-addons):** Highly recommended if you wish to spawn permanent, static deposit boxes at monuments (e.g., Outpost, Bandit Camp).
+  > **Quick Start:** You can use our example **[bloodbank.json profile](https://github.com/orangemart/RustPlugins/tree/main/MonumentAddons)** to automatically deploy "Blood Bank" deposit stations at safe zones that work seamlessly with this leaderboard.
+
+---
+
 ## Installation
 
-1. Upload `ScrapLeaderboard.cs` to your server's `oxide/plugins/` directory.
-2. The plugin will handle the rest.
+1. Ensure **ServerInfo** is installed and configured on your server.
+2. Upload `ScrapLeaderboard.cs` to your server's `oxide/plugins/` directory.
+3. The plugin will handle the rest.
    > **Note:** If you are upgrading from **DepositBox**, this plugin automatically detects your existing `oxide/data/DepositBoxLog.json`, migrates the data to the new folder, and renames it to `ScrapLog.json` so no player history is lost.
 
 ---
