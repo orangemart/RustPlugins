@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "1.2.0")]
+    [Info("Team Skins", "Orangemart", "1.2.1")]
     [Description("Allows team members to share their owned skins in the Skins menu.")]
     public class TeamSkins : RustPlugin
     {
@@ -193,18 +193,29 @@ namespace Oxide.Plugins
 
             foreach (var memberId in team.members)
             {
-                if (memberId == player.userID) continue;
+                // Modification: We no longer skip the player themselves.
+                // We also optimize: if the member is the current player, use the existing object 
+                // to avoid an unnecessary helper search.
+                BasePlayer memberPlayer;
+                
+                if (memberId == player.userID)
+                {
+                    memberPlayer = player;
+                }
+                else
+                {
+                    memberPlayer = BasePlayer.Find(memberId.ToString());
+                }
 
-                BasePlayer teammate = BasePlayer.Find(memberId.ToString());
-                if (teammate == null || !teammate.IsConnected) continue;
+                if (memberPlayer == null || !memberPlayer.IsConnected) continue;
 
                 foreach (ulong skinId in potentialSkins)
                 {
                     if (skins.Contains(skinId)) continue;
 
-                    bool teammateOwns = CallDlcApi(teammate, skinId);
+                    bool isOwned = CallDlcApi(memberPlayer, skinId);
 
-                    if (teammateOwns)
+                    if (isOwned)
                     {
                         skins.Add(skinId);
                         addedCount++;
@@ -214,7 +225,7 @@ namespace Oxide.Plugins
             
             if (addedCount > 0)
             {
-               // Puts($"[TeamSkins] Added {addedCount} shared skins from teammates for {player.displayName} ({info.shortname}).");
+               // Puts($"[TeamSkins] Added {addedCount} shared skins for {player.displayName} ({info.shortname}).");
             }
         }
 
