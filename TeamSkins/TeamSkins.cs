@@ -1,239 +1,462 @@
 using System.Collections.Generic;
 using System.Linq;
+using Facepunch;
+using Newtonsoft.Json;
+using Oxide.Core;
 using Oxide.Core.Plugins;
+using Oxide.Core.Libraries.Covalence;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "1.2.1")]
-    [Description("Allows team members to share their owned skins in the Skins menu.")]
+    [Info("Team Skins", "Orangemart", "2.0.0")]
+    [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
-        [PluginReference] private Plugin PlayerDLCAPI, Skins;
+        [PluginReference] private Plugin PlayerDLCAPI;
 
-        // Cache <Shortname, List<WorkshopID>>
-        private readonly Dictionary<string, List<ulong>> _itemSkinCache = new Dictionary<string, List<ulong>>();
+        private const string PermUse = "teamskins.use";
         
-        private int _retryCount = 0;
+        // --- Cache Data ---
+        private readonly Dictionary<string, List<ulong>> _autoSkinCache = new Dictionary<string, List<ulong>>();
+        private readonly Dictionary<string, List<SkinConfigEntry>> _manualSkinCache = new Dictionary<string, List<SkinConfigEntry>>();
+
+        private readonly Dictionary<ulong, ItemContainer> _openContainers = new Dictionary<ulong, ItemContainer>();
+        private readonly HashSet<ulong> _openingPlayers = new HashSet<ulong>();
+
+        // --- Configuration ---
+        private PluginConfig _config;
+
+        private class PluginConfig
+        {
+            [JsonProperty("Commands", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public List<string> Commands = new List<string> { "skin", "skins", "sb" };
+
+            [JsonProperty("Container Panel Name")]
+            public string PanelName = "generic";
+
+            [JsonProperty("Container Capacity")]
+            public int Capacity = 36;
+
+            [JsonProperty("Extra Skins", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public List<SkinConfigEntry> ExtraSkins = new List<SkinConfigEntry>(); 
+        }
+
+        private class SkinConfigEntry
+        {
+            [JsonProperty("Item Shortname")]
+            public string Shortname;
+
+            [JsonProperty("Permission")]
+            public string Permission;
+
+            [JsonProperty("Skins")]
+            public List<ulong> Skins;
+        }
+
+        #region Setup & Config
+
+        protected override void LoadDefaultConfig()
+        {
+            _config = new PluginConfig
+            {
+                ExtraSkins = new List<SkinConfigEntry>
+                {
+                    // Example provided for server admins to understand JSON structure
+                    new SkinConfigEntry
+                    {
+                        Shortname = "hoodie",
+                        Permission = "teamskins.admin",
+                        Skins = new List<ulong> { 3492377614 }
+                    }
+                }
+            };
+        }
+
+        protected override void LoadConfig()
+        {
+            base.LoadConfig();
+            try
+            {
+                _config = Config.ReadObject<PluginConfig>();
+                if (_config == null) throw new System.Exception();
+            }
+            catch
+            {
+                PrintError("Configuration file is corrupt! Loading default config.");
+                LoadDefaultConfig();
+            }
+            SaveConfig();
+        }
+
+        protected override void SaveConfig() => Config.WriteObject(_config);
+
+        private void Init()
+        {
+            permission.RegisterPermission(PermUse, this);
+
+            // Register Permissions from Config
+            if (_config.ExtraSkins != null)
+            {
+                foreach (var entry in _config.ExtraSkins)
+                {
+                    if (!string.IsNullOrEmpty(entry.Permission))
+                    {
+                        if (!permission.PermissionExists(entry.Permission, this))
+                            permission.RegisterPermission(entry.Permission, this);
+                    }
+                }
+            }
+
+            // Optimize Config Skins for Lookup
+            BuildManualCache();
+        }
 
         private void OnServerInitialized()
         {
-            CheckSteamDefinitions();
+            // Register Commands
+            foreach (var cmd in _config.Commands)
+            {
+                AddCovalenceCommand(cmd, nameof(CmdSkin));
+            }
+
+            Puts($"[Team Skins] Registered {_config.Commands.Count} commands. Building Skin Cache...");
+            BuildUniversalCache();
         }
 
-        #region Steam Cache Building
-        private void CheckSteamDefinitions()
+        private void Unload()
         {
-            if ((Steamworks.SteamInventory.Definitions?.Length ?? 0) == 0)
+            foreach (var kvp in _openContainers)
             {
-                _retryCount++;
-                if (_retryCount < 10) 
+                var player = BasePlayer.FindByID(kvp.Key);
+                if (kvp.Value != null)
                 {
-                    timer.In(6f, CheckSteamDefinitions);
+                    if (player != null) player.GiveItem(kvp.Value.GetSlot(0));
+                    kvp.Value.Kill();
                 }
-                else
-                {
-                    Puts("[TeamSkins] Warning: Steam Inventory Definitions timed out. Only built-in skins will be available.");
-                    BuildSkinCache(); 
-                }
+            }
+            _openContainers.Clear();
+            _openingPlayers.Clear();
+        }
+
+        #endregion
+
+        #region Commands & Logic
+
+        private void CmdSkin(IPlayer iplayer, string command, string[] args)
+        {
+            var player = iplayer.Object as BasePlayer;
+            if (player == null) return;
+
+            if (args.Length > 0 && args[0].ToLower() == "refresh" && player.IsAdmin)
+            {
+                player.ChatMessage("Rebuilding skin cache...");
+                BuildUniversalCache();
+                LoadConfig();
+                BuildManualCache();
                 return;
             }
-            BuildSkinCache();
+
+            if (!iplayer.HasPermission(PermUse))
+            {
+                player.ChatMessage("You do not have permission (teamskins.use).");
+                return;
+            }
+
+            _openingPlayers.Add(player.userID);
+            if (player.inventory.loot.IsLooting()) player.EndLooting();
+            
+            timer.In(0.2f, () => OpenVirtualBox(player));
         }
 
-        private void BuildSkinCache()
+        private void OpenVirtualBox(BasePlayer player)
         {
-            _itemSkinCache.Clear();
-            int builtInCount = 0;
-            int workshopCount = 0;
-            
-            Puts("[TeamSkins] Starting Skin Cache Build...");
-
-            foreach (var skin in ItemSkinDirectory.Instance.skins)
+            if (player == null || !player.IsConnected)
             {
-                var def = skin.invItem?.itemDefinition;
-                if (def == null)
-                    def = ItemManager.FindItemDefinition(skin.itemid);
+                _openingPlayers.Remove(player.userID);
+                return;
+            }
 
-                if (def != null)
+            if (_openContainers.ContainsKey(player.userID))
+            {
+                var old = _openContainers[player.userID];
+                if(old != null) old.Kill();
+                _openContainers.Remove(player.userID);
+            }
+
+            var container = new ItemContainer();
+            container.entityOwner = player;
+            container.capacity = _config.Capacity;
+            container.isServer = true;
+            container.allowedContents = ItemContainer.ContentsType.Generic;
+            container.GiveUID();
+            
+            _openContainers[player.userID] = container;
+
+            player.inventory.loot.Clear();
+            player.inventory.loot.PositionChecks = false;
+            player.inventory.loot.entitySource = player;
+            player.inventory.loot.itemSource = null;
+            player.inventory.loot.AddContainer(container);
+            player.inventory.loot.SendImmediate();
+            
+            player.ClientRPCPlayer(null, player, "RPC_OpenLootPanel", _config.PanelName);
+            timer.In(1.0f, () => _openingPlayers.Remove(player.userID));
+        }
+
+        #endregion
+
+        #region Interaction Hooks
+
+        private object CanLootPlayer(BasePlayer looter, BasePlayer target)
+        {
+            if (looter != target) return null;
+            if (_openContainers.ContainsKey(looter.userID)) return true;
+            return null;
+        }
+
+        private void OnPlayerLootEnd(PlayerLoot inventory)
+        {
+            var player = inventory.GetComponent<BasePlayer>();
+            if (player == null) return;
+            if (_openingPlayers.Contains(player.userID)) return;
+
+            if (_openContainers.ContainsKey(player.userID))
+            {
+                if (inventory.entitySource == player)
                 {
-                    AddToCache(def.shortname, (ulong)skin.id);
+                    var container = _openContainers[player.userID];
+                    var item = container.GetSlot(0);
+                    if (item != null) player.GiveItem(item);
+
+                    container.Kill();
+                    _openContainers.Remove(player.userID);
+                }
+            }
+        }
+
+        private void OnItemAddedToContainer(ItemContainer container, Item item)
+        {
+            var ownerId = _openContainers.FirstOrDefault(x => x.Value == container).Key;
+            if (ownerId == 0) return;
+
+            if (item.position == 0)
+            {
+                var player = BasePlayer.FindByID(ownerId);
+                if (player != null) NextFrame(() => DisplaySkins(player, container, item));
+            }
+        }
+
+        private void DisplaySkins(BasePlayer player, ItemContainer container, Item targetItem)
+        {
+            for (int i = 1; i < container.capacity; i++)
+            {
+                var ghost = container.GetSlot(i);
+                if (ghost != null) { ghost.RemoveFromContainer(); ghost.Remove(); }
+            }
+
+            var baseDef = GetBaseItemDef(targetItem.info);
+            var skins = GetCombinedSkins(player, baseDef.shortname);
+
+            if (skins.Count == 0)
+            {
+                player.ChatMessage("No skins found for this item.");
+                return;
+            }
+
+            int slot = 1;
+            foreach (var skinId in skins)
+            {
+                if (slot >= container.capacity) break;
+                
+                Item ghost = ItemManager.Create(baseDef, 1, skinId);
+                if (ghost != null)
+                {
+                    ghost.condition = targetItem.condition;
+                    ghost.maxCondition = targetItem.maxCondition;
+                    ghost.MoveToContainer(container, slot);
+                    slot++;
+                }
+            }
+        }
+
+        private object CanMoveItem(Item item, PlayerInventory playerLoot, ItemContainerId targetContainer, int targetSlot, int amount)
+        {
+            var player = playerLoot.GetComponent<BasePlayer>();
+            if (player == null || !_openContainers.TryGetValue(player.userID, out var box)) return null;
+
+            // Interaction: Clicking/Dragging Ghost
+            if (item.parent == box && item.position > 0)
+            {
+                var originalItem = box.GetSlot(0);
+                if (originalItem != null)
+                {
+                    // Ghost Adoption Logic (v9.0)
+                    TransferItemProps(originalItem, item);
                     
-                    var itemSkin = skin.invItem as ItemSkin;
-                    if (itemSkin != null && itemSkin.workshopID != 0)
+                    originalItem.RemoveFromContainer();
+                    originalItem.Remove();
+                    
+                    player.ChatMessage($"Skin Applied! ({item.info.displayName.translated})");
+                    
+                    NextFrame(() => {
+                        if (player.IsConnected) player.EndLooting();
+                    });
+                    
+                    return null; // Allow move
+                }
+                return false;
+            }
+
+            // Block dragging INTO ghost slots
+            if (targetContainer == box.uid && targetSlot > 0) return false;
+
+            return null;
+        }
+
+        private void TransferItemProps(Item source, Item destination)
+        {
+            destination.condition = source.condition;
+            destination.maxCondition = source.maxCondition;
+            
+            if (source.contents != null && destination.contents != null)
+            {
+                for (int i = source.contents.itemList.Count - 1; i >= 0; i--)
+                {
+                    var child = source.contents.itemList[i];
+                    child.MoveToContainer(destination.contents);
+                }
+            }
+            
+            var sourceProjectile = source.GetHeldEntity() as BaseProjectile;
+            var destProjectile = destination.GetHeldEntity() as BaseProjectile;
+            
+            if (sourceProjectile != null && destProjectile != null)
+            {
+                destProjectile.primaryMagazine.contents = sourceProjectile.primaryMagazine.contents;
+                destProjectile.primaryMagazine.ammoType = sourceProjectile.primaryMagazine.ammoType;
+            }
+        }
+
+        #endregion
+
+        #region Cache & Lookup
+
+        private void BuildManualCache()
+        {
+            _manualSkinCache.Clear();
+            if (_config.ExtraSkins == null) return;
+
+            foreach (var entry in _config.ExtraSkins)
+            {
+                if (string.IsNullOrEmpty(entry.Shortname)) continue;
+
+                if (!_manualSkinCache.ContainsKey(entry.Shortname))
+                    _manualSkinCache[entry.Shortname] = new List<SkinConfigEntry>();
+
+                _manualSkinCache[entry.Shortname].Add(entry);
+            }
+        }
+
+        private void BuildUniversalCache()
+        {
+            _autoSkinCache.Clear();
+
+            // 1. Internal Scan
+            foreach (var def in ItemManager.itemList)
+            {
+                if (def.skins != null)
+                {
+                    foreach (var skin in def.skins)
                     {
-                        AddToCache(def.shortname, itemSkin.workshopID);
+                        ulong skinId = (ulong)skin.id;
+                        if (skinId == 0) continue;
+                        var uiDef = def.isRedirectOf ?? def;
+                        AddAutoCache(uiDef.shortname, skinId);
                     }
-                    builtInCount++;
                 }
             }
 
+            // 2. Workshop Scan
             if (Steamworks.SteamInventory.Definitions != null)
             {
                 foreach (var def in Steamworks.SteamInventory.Definitions)
                 {
-                    string targetShortname = def.GetProperty("itemshortname");
+                    string shortname = def.GetProperty("itemshortname");
                     string workshopIdStr = def.GetProperty("workshopid");
+                    if (string.IsNullOrEmpty(shortname)) continue;
 
-                    if (string.IsNullOrEmpty(targetShortname)) continue;
+                    ulong skinId = 0;
+                    if (!string.IsNullOrEmpty(workshopIdStr) && ulong.TryParse(workshopIdStr, out ulong wId)) skinId = wId;
+                    else skinId = (ulong)def.Id;
 
-                    ulong skinId;
-                    if (!string.IsNullOrEmpty(workshopIdStr) && ulong.TryParse(workshopIdStr, out ulong wId))
-                        skinId = wId;
-                    else 
-                        skinId = (ulong)def.Id;
-
-                    if (skinId != 0)
-                    {
-                        AddToCache(targetShortname, skinId);
-                        workshopCount++;
-                    }
-                }
-            }
-            
-            Puts($"[TeamSkins] Cache Complete. Built-in: {builtInCount}, Workshop/Steam: {workshopCount}. Total Items Tracked: {_itemSkinCache.Count}");
-        }
-
-        private void AddToCache(string shortname, ulong skinId)
-        {
-            if (!_itemSkinCache.ContainsKey(shortname))
-                _itemSkinCache[shortname] = new List<ulong>();
-
-            if (!_itemSkinCache[shortname].Contains(skinId))
-                _itemSkinCache[shortname].Add(skinId);
-        }
-        #endregion
-
-        #region Team & Connection Watchers (Cache Clearing)
-        
-        // Helper to ask Skins plugin to clear cache for a player
-        private void InvalidateSkinsCache(ulong userId)
-        {
-            if (Skins != null && Skins.IsLoaded)
-            {
-                // Calling "PurgeCache" with the userID and null (to clear ALL items for that user)
-                Skins.Call("PurgeCache", userId, null);
-            }
-        }
-
-        // When a player logs in, their teammates might now have access to new skins.
-        // We must invalidate the cache for the player AND their teammates.
-        private void OnPlayerConnected(BasePlayer player)
-        {
-            if (player.currentTeam == 0) return;
-            
-            InvalidateSkinsCache(player.userID); // Clear their own cache
-            
-            var team = RelationshipManager.ServerInstance.FindTeam(player.currentTeam);
-            if (team != null)
-            {
-                foreach (var memberId in team.members)
-                {
-                    if (memberId != player.userID) InvalidateSkinsCache(memberId);
+                    if (skinId != 0) AddAutoCache(shortname, skinId);
                 }
             }
         }
 
-        private void OnPlayerDisconnected(BasePlayer player)
+        private void AddAutoCache(string shortname, ulong skinId)
         {
-            // If a player leaves, their skins are no longer available. Clear teammate caches.
+            if (!_autoSkinCache.ContainsKey(shortname)) _autoSkinCache[shortname] = new List<ulong>();
+            if (!_autoSkinCache[shortname].Contains(skinId)) _autoSkinCache[shortname].Add(skinId);
+        }
+
+        private ItemDefinition GetBaseItemDef(ItemDefinition currentDef)
+        {
+            return currentDef.isRedirectOf ?? currentDef;
+        }
+
+        private List<ulong> GetCombinedSkins(BasePlayer player, string shortname)
+        {
+            var results = new HashSet<ulong>();
+
+            // 1. Resolve Team Members
+            var teamMembers = new List<ulong> { player.userID };
             if (player.currentTeam != 0)
             {
                 var team = RelationshipManager.ServerInstance.FindTeam(player.currentTeam);
-                if (team != null)
+                if (team != null) teamMembers = team.members;
+            }
+
+            foreach (var memberId in teamMembers)
+            {
+                var member = BasePlayer.Find(memberId.ToString());
+                if (member == null || !member.IsConnected) continue;
+
+                // 2. Check Auto Cache (Steam/Game Ownership)
+                if (_autoSkinCache.TryGetValue(shortname, out var autoSkins))
                 {
-                    foreach (var memberId in team.members)
+                    foreach (var skinId in autoSkins)
                     {
-                        InvalidateSkinsCache(memberId);
+                        if (HasSkinAccess(member, skinId)) results.Add(skinId);
+                    }
+                }
+
+                // 3. Check Manual Config Skins (Permission)
+                if (_manualSkinCache.TryGetValue(shortname, out var manualEntries))
+                {
+                    foreach (var entry in manualEntries)
+                    {
+                        // Check if member has permission for this set
+                        if (string.IsNullOrEmpty(entry.Permission) || 
+                            permission.UserHasPermission(member.UserIDString, entry.Permission))
+                        {
+                            foreach (var s in entry.Skins) results.Add(s);
+                        }
                     }
                 }
             }
+
+            return results.ToList();
         }
 
-        private void OnTeamAcceptInvite(RelationshipManager.PlayerTeam team, BasePlayer player)
+        private bool HasSkinAccess(BasePlayer player, ulong skinId)
         {
-            // Player joined a team -> Clear cache for everyone in that team so they see new skins
-            foreach (var memberId in team.members) InvalidateSkinsCache(memberId);
-        }
-
-        private void OnTeamLeave(RelationshipManager.PlayerTeam team, BasePlayer player)
-        {
-            // Player left -> Clear their cache (lose access) and teammates cache (lose their access)
-            InvalidateSkinsCache(player.userID);
-            foreach (var memberId in team.members) InvalidateSkinsCache(memberId);
-        }
-
-        private void OnTeamKick(RelationshipManager.PlayerTeam team, BasePlayer player, ulong target)
-        {
-            InvalidateSkinsCache(target);
-            foreach (var memberId in team.members) InvalidateSkinsCache(memberId);
-        }
-
-        private void OnTeamDisband(RelationshipManager.PlayerTeam team)
-        {
-            foreach (var memberId in team.members) InvalidateSkinsCache(memberId);
-        }
-        
-        #endregion
-
-        #region Core Logic
-        private void OnSkinsFetch(BasePlayer player, ItemDefinition info, List<ulong> skins)
-        {
-            if (player == null || info == null) return;
-            if (PlayerDLCAPI == null || !PlayerDLCAPI.IsLoaded) return;
-            if (player.currentTeam == 0) return;
-
-            RelationshipManager.PlayerTeam team = RelationshipManager.ServerInstance.FindTeam(player.currentTeam);
-            if (team == null) return;
-
-            if (!_itemSkinCache.ContainsKey(info.shortname)) return;
-
-            List<ulong> potentialSkins = _itemSkinCache[info.shortname];
-            int addedCount = 0;
-
-            foreach (var memberId in team.members)
-            {
-                // Modification: We no longer skip the player themselves.
-                // We also optimize: if the member is the current player, use the existing object 
-                // to avoid an unnecessary helper search.
-                BasePlayer memberPlayer;
-                
-                if (memberId == player.userID)
-                {
-                    memberPlayer = player;
-                }
-                else
-                {
-                    memberPlayer = BasePlayer.Find(memberId.ToString());
-                }
-
-                if (memberPlayer == null || !memberPlayer.IsConnected) continue;
-
-                foreach (ulong skinId in potentialSkins)
-                {
-                    if (skins.Contains(skinId)) continue;
-
-                    bool isOwned = CallDlcApi(memberPlayer, skinId);
-
-                    if (isOwned)
-                    {
-                        skins.Add(skinId);
-                        addedCount++;
-                    }
-                }
-            }
-            
-            if (addedCount > 0)
-            {
-               // Puts($"[TeamSkins] Added {addedCount} shared skins for {player.displayName} ({info.shortname}).");
-            }
-        }
-
-        private bool CallDlcApi(BasePlayer player, ulong skinId)
-        {
+            if (PlayerDLCAPI == null) return false;
             object result = PlayerDLCAPI.Call("IsOwnedOrFreeSkin", player, skinId);
-            return result is bool hasSkin && hasSkin;
+            return result is bool b && b;
         }
+
         #endregion
     }
 }
