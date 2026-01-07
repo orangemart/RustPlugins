@@ -74,6 +74,45 @@
           "Args": []
         }
       ]
+    },
+    "fishing_village_a": {
+      "Entities": [
+        {
+          "Id": "4d391fd4-6293-44a3-9845-b8a2e377567e",
+          "PrefabName": "assets/prefabs/deployable/large wood storage/box.wooden.large.prefab",
+          "Position": {
+            "x": -34.18077,
+            "y": 2.118212,
+            "z": -20.28579
+          },
+          "RotationAngles": {
+            "x": 0.0,
+            "y": 0.749938965,
+            "z": 0.0
+          },
+          "Skin": 3616815672
+        }
+      ],
+      "Pastes": [
+        {
+          "Id": "607a9eb1-71c0-418f-8273-5da9812eff65",
+          "Position": {
+            "x": -34.17671,
+            "y": 1.98999989,
+            "z": -20.8610649
+          },
+          "RotationAngles": {
+            "x": 0.0,
+            "y": 180.965714,
+            "z": 0.0
+          },
+          "Filename": "bloodbank",
+          "Args": [
+            "height",
+            "1.6"
+          ]
+        }
+      ]
     }
   }
 }
