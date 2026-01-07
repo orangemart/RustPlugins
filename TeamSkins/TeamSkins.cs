@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "2.0.1")]
+    [Info("Team Skins", "Orangemart", "2.0.3")]
     [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
@@ -112,6 +112,10 @@ namespace Oxide.Plugins
             BuildManualCache();
         }
 
+       // --- Replace your existing OnServerInitialized with this ---
+        
+        private Timer _initTimer;
+
         private void OnServerInitialized()
         {
             // Register Commands
@@ -120,13 +124,35 @@ namespace Oxide.Plugins
                 AddCovalenceCommand(cmd, nameof(CmdSkin));
             }
 
-            // Wait 10 seconds for Steamworks data to settle before building cache
-            Puts($"[Team Skins] Registered {_config.Commands.Count} commands. Waiting for Steamworks...");
-            
-            timer.In(10f, () => {
+            Puts($"[Team Skins] Registered {_config.Commands.Count} commands. Waiting for Steam Inventory...");
+
+            // Check every 10 seconds, up to 12 times (2 minutes total)
+            _initTimer = timer.Repeat(10f, 12, TryBuildCache);
+        }
+
+        private void TryBuildCache()
+        {
+            // Check if Steam definitions are actually populated
+            var defs = Steamworks.SteamInventory.Definitions;
+            int count = (defs != null) ? defs.Length : 0;
+
+            // Rust usually has 5000+ skins. If we have less than 500, Steam hasn't finished loading.
+            if (count > 500)
+            {
+                Puts($"[Team Skins] Steam Inventory detected ({count} items). Building Cache...");
                 BuildUniversalCache();
-                Puts("[Team Skins] Skin Cache Built!");
-            });
+                
+                // Stop the timer so we don't keep building
+                if (_initTimer != null && !_initTimer.Destroyed)
+                {
+                    _initTimer.Destroy();
+                    _initTimer = null;
+                }
+            }
+            else
+            {
+                Puts($"[Team Skins] Still waiting for skin definitions... (Found: {count})");
+            }
         }
 
         private void Unload()
@@ -232,10 +258,33 @@ namespace Oxide.Plugins
                 {
                     var container = _openContainers[player.userID];
                     var item = container.GetSlot(0);
+                    
+                    // Give back the item in Slot 0 (if it exists)
                     if (item != null) player.GiveItem(item);
 
                     container.Kill();
                     _openContainers.Remove(player.userID);
+                }
+            }
+        }
+
+        // FIX 2: Visual Glitch - Clear ghosts if you drag the item out of Slot 0
+        private void OnItemRemovedFromContainer(ItemContainer container, Item item)
+        {
+            var ownerId = _openContainers.FirstOrDefault(x => x.Value == container).Key;
+            if (ownerId == 0) return;
+
+            // If Slot 0 is now empty, wipe the skin preview immediately
+            if (container.GetSlot(0) == null)
+            {
+                for (int i = 1; i < container.capacity; i++)
+                {
+                    var ghost = container.GetSlot(i);
+                    if (ghost != null)
+                    {
+                        ghost.RemoveFromContainer();
+                        ghost.Remove();
+                    }
                 }
             }
         }
@@ -254,6 +303,7 @@ namespace Oxide.Plugins
 
         private void DisplaySkins(BasePlayer player, ItemContainer container, Item targetItem)
         {
+            // Clear existing ghosts first
             for (int i = 1; i < container.capacity; i++)
             {
                 var ghost = container.GetSlot(i);
@@ -290,30 +340,55 @@ namespace Oxide.Plugins
             var player = playerLoot.GetComponent<BasePlayer>();
             if (player == null || !_openContainers.TryGetValue(player.userID, out var box)) return null;
 
-            // Interaction: Clicking/Dragging Ghost
+            // Interaction: Clicking/Dragging a Skin Ghost
             if (item.parent == box && item.position > 0)
             {
                 var originalItem = box.GetSlot(0);
                 if (originalItem != null)
                 {
-                    // Ghost Adoption Logic (v9.0)
-                    TransferItemProps(originalItem, item);
-                    
-                    originalItem.RemoveFromContainer();
-                    originalItem.Remove();
-                    
+                    // Check if this is a "Redirect" (Item Definition Change)
+                    // e.g. Wolf Headdress -> Dragon Mask
+                    bool isRedirect = item.info.shortname != originalItem.info.shortname;
+
+                    if (isRedirect)
+                    {
+                        // SCENARIO A: Redirect (Must adopt the ghost item)
+                        TransferItemProps(originalItem, item);
+                        
+                        // Force Move GHOST to player
+                        if (!item.MoveToContainer(player.inventory.containerMain))
+                            item.MoveToContainer(player.inventory.containerBelt);
+                            
+                        // Destroy the original
+                        originalItem.RemoveFromContainer();
+                        originalItem.Remove();
+                    }
+                    else
+                    {
+                        // SCENARIO B: Simple Skin (Modify the original)
+                        // This preserves custom names, water amounts, etc.
+                        originalItem.skin = item.skin;
+                        originalItem.MarkDirty(); // Update icon
+                        
+                        // Force Move ORIGINAL to player
+                        if (!originalItem.MoveToContainer(player.inventory.containerMain))
+                            originalItem.MoveToContainer(player.inventory.containerBelt);
+                    }
+
                     player.ChatMessage($"Skin Applied! ({item.info.displayName.translated})");
                     
+                    // Close the UI on the next frame
                     NextFrame(() => {
                         if (player.IsConnected) player.EndLooting();
                     });
                     
-                    return null; // Allow move
+                    // Return FALSE to block the default move behavior
+                    // (We have already moved the item manually above)
+                    return false; 
                 }
-                return false;
             }
 
-            // Block dragging INTO ghost slots
+            // Block dragging items INTO the ghost slots (1-35)
             if (targetContainer == box.uid && targetSlot > 0) return false;
 
             return null;
