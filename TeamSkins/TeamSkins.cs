@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "2.0.0")]
+    [Info("Team Skins", "Orangemart", "2.0.1")]
     [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
@@ -120,8 +120,13 @@ namespace Oxide.Plugins
                 AddCovalenceCommand(cmd, nameof(CmdSkin));
             }
 
-            Puts($"[Team Skins] Registered {_config.Commands.Count} commands. Building Skin Cache...");
-            BuildUniversalCache();
+            // Wait 10 seconds for Steamworks data to settle before building cache
+            Puts($"[Team Skins] Registered {_config.Commands.Count} commands. Waiting for Steamworks...");
+            
+            timer.In(10f, () => {
+                BuildUniversalCache();
+                Puts("[Team Skins] Skin Cache Built!");
+            });
         }
 
         private void Unload()
