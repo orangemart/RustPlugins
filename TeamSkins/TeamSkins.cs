@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "2.0.3")]
+    [Info("Team Skins", "Orangemart", "2.0.4")]
     [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
@@ -336,63 +336,64 @@ namespace Oxide.Plugins
         }
 
         private object CanMoveItem(Item item, PlayerInventory playerLoot, ItemContainerId targetContainer, int targetSlot, int amount)
+{
+    var player = playerLoot.GetComponent<BasePlayer>();
+    if (player == null || !_openContainers.TryGetValue(player.userID, out var box)) return null;
+
+    // Interaction: Clicking/Dragging a Skin Ghost
+    if (item.parent == box && item.position > 0)
+    {
+        var originalItem = box.GetSlot(0);
+        if (originalItem != null)
         {
-            var player = playerLoot.GetComponent<BasePlayer>();
-            if (player == null || !_openContainers.TryGetValue(player.userID, out var box)) return null;
+            // Check if this is a "Redirect" (Item Definition Change)
+            bool isRedirect = item.info.shortname != originalItem.info.shortname;
 
-            // Interaction: Clicking/Dragging a Skin Ghost
-            if (item.parent == box && item.position > 0)
+            if (isRedirect)
             {
-                var originalItem = box.GetSlot(0);
-                if (originalItem != null)
+                // SCENARIO A: Redirect (Must adopt the ghost item)
+                TransferItemProps(originalItem, item);
+                
+                if (!item.MoveToContainer(player.inventory.containerMain))
+                    item.MoveToContainer(player.inventory.containerBelt);
+                    
+                originalItem.RemoveFromContainer();
+                originalItem.Remove();
+            }
+            else
+            {
+                // SCENARIO B: Simple Skin (Modify the original)
+                originalItem.skin = item.skin;
+                originalItem.MarkDirty(); // Update icon
+                
+                // --- FIX START: Force Update Held Entity ---
+                var heldEntity = originalItem.GetHeldEntity();
+                if (heldEntity != null)
                 {
-                    // Check if this is a "Redirect" (Item Definition Change)
-                    // e.g. Wolf Headdress -> Dragon Mask
-                    bool isRedirect = item.info.shortname != originalItem.info.shortname;
-
-                    if (isRedirect)
-                    {
-                        // SCENARIO A: Redirect (Must adopt the ghost item)
-                        TransferItemProps(originalItem, item);
-                        
-                        // Force Move GHOST to player
-                        if (!item.MoveToContainer(player.inventory.containerMain))
-                            item.MoveToContainer(player.inventory.containerBelt);
-                            
-                        // Destroy the original
-                        originalItem.RemoveFromContainer();
-                        originalItem.Remove();
-                    }
-                    else
-                    {
-                        // SCENARIO B: Simple Skin (Modify the original)
-                        // This preserves custom names, water amounts, etc.
-                        originalItem.skin = item.skin;
-                        originalItem.MarkDirty(); // Update icon
-                        
-                        // Force Move ORIGINAL to player
-                        if (!originalItem.MoveToContainer(player.inventory.containerMain))
-                            originalItem.MoveToContainer(player.inventory.containerBelt);
-                    }
-
-                    player.ChatMessage($"Skin Applied! ({item.info.displayName.translated})");
-                    
-                    // Close the UI on the next frame
-                    NextFrame(() => {
-                        if (player.IsConnected) player.EndLooting();
-                    });
-                    
-                    // Return FALSE to block the default move behavior
-                    // (We have already moved the item manually above)
-                    return false; 
+                    heldEntity.skinID = item.skin;
+                    heldEntity.SendNetworkUpdate();
                 }
+                // --- FIX END ---
+
+                // Force Move ORIGINAL to player
+                if (!originalItem.MoveToContainer(player.inventory.containerMain))
+                    originalItem.MoveToContainer(player.inventory.containerBelt);
             }
 
-            // Block dragging items INTO the ghost slots (1-35)
-            if (targetContainer == box.uid && targetSlot > 0) return false;
-
-            return null;
+            player.ChatMessage($"Skin Applied! ({item.info.displayName.translated})");
+            
+            NextFrame(() => {
+                if (player.IsConnected) player.EndLooting();
+            });
+            
+            return false; 
         }
+    }
+
+    if (targetContainer == box.uid && targetSlot > 0) return false;
+
+    return null;
+}
 
         private void TransferItemProps(Item source, Item destination)
         {
