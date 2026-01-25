@@ -1,7 +1,7 @@
 /*
 ================================================================================================
   ScrapLeaderboard
-  Version: 2.1.0
+  Version: 2.3.0
   Author: Orangemart
 ================================================================================================
 
@@ -9,25 +9,14 @@
   This plugin handles scrap deposits, enforces real-time limits, logs transactions, 
   and updates the ServerInfo leaderboard automatically.
 
-  PERMISSIONS:
-  - scrapleaderboard.place :  Allows player to use /depositbox to place a box.
-  - scrapleaderboard.admin :  Allows access to /scrapleaderboard command.
-
-  COMMANDS:
-  - /depositbox              :  Give yourself a deployable deposit box.
-  - /scrapleaderboard [pool] :  (Admin) Generates summary files, updates ServerInfo, and reloads it.
-                                [pool] is optional prize pool amount (default 100,000).
-
-  DATA FILES (oxide/data/ScrapLeaderboard/):
-  - ScrapLog.json     : Permanent transaction log.
-  - ScrapSummary.json : Calculated totals and percentages.
-  - ScrapClaims.json  : Reward payouts based on prize pool.
+  UPDATES v2.3.0:
+  - ADDED: Configuration option 'EnableTeamSplitting' to toggle the entire splitting feature.
+  - v2.2.3: Improved chat messages for split deposits.
+  - v2.2.2: Fixed NullReference/RPC crashes on reload.
 
   CONFIGURATION (oxide/config/ScrapLeaderboard.json):
-  - DepositBoxSkinID  : 3616815672
-  - DepositItemID     : -932201673 (Scrap)
-  - MaxDepositLimit   : 250000
-
+  - EnableTeamSplitting: (bool) Should deposits be split among teammates? (Default: true)
+  - SplitWithOfflineTeammates: (bool) Distribute scrap to offline team members? (Default: false)
 ================================================================================================
 */
 
@@ -46,7 +35,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ScrapLeaderboard", "Orangemart", "2.1.0")]
+    [Info("ScrapLeaderboard", "Orangemart", "2.3.0")]
     [Description("Handles scrap deposits, enforces limits, and updates the ServerInfo leaderboard.")]
     public class ScrapLeaderboard : CovalencePlugin
     {
@@ -56,6 +45,8 @@ namespace Oxide.Plugins
         private int DepositItemID;
         private ulong DepositBoxSkinID;
         private int MaxDepositLimit;
+        private bool EnableTeamSplitting;
+        private bool SplitWithOfflineTeammates;
         
         // ==========================================================================
         // Constants & Paths
@@ -84,14 +75,20 @@ namespace Oxide.Plugins
         {
             instance = this;
             LoadConfiguration();
-            
-            // Handle loading and potential migration from old filenames
             LoadAndMigrateData();
-            
             RecalculateTotals();
 
             permission.RegisterPermission(PermPlace, this);
             permission.RegisterPermission(PermAdmin, this);
+            
+            // Force refresh components on reload
+            NextTick(() => {
+                foreach (var entity in BaseNetworkable.serverEntities)
+                {
+                    if (entity is StorageContainer container)
+                        OnEntitySpawned(container);
+                }
+            });
         }
 
         void OnServerInitialized(bool initial)
@@ -105,10 +102,10 @@ namespace Oxide.Plugins
 
         void Unload()
         {
-            foreach (var entity in BaseNetworkable.serverEntities)
+            var boxes = UnityEngine.Object.FindObjectsOfType<DepositBoxRestriction>();
+            foreach (var box in boxes)
             {
-                if (entity is StorageContainer container && container.TryGetComponent(out DepositBoxRestriction restriction))
-                    UnityEngine.Object.Destroy(restriction);
+                UnityEngine.Object.Destroy(box);
             }
             instance = null;
         }
@@ -117,28 +114,53 @@ namespace Oxide.Plugins
         {
             if (container == null || container.skinID != DepositBoxSkinID) return;
             
-            if (!container.TryGetComponent(out DepositBoxRestriction mono))
-            {
-                mono = container.gameObject.AddComponent<DepositBoxRestriction>();
-                mono.container = container.inventory;
-                mono.InitDepositBox();
-            }
+            var existing = container.GetComponent<DepositBoxRestriction>();
+            if (existing != null) UnityEngine.Object.Destroy(existing);
+
+            var mono = container.gameObject.AddComponent<DepositBoxRestriction>();
+            mono.container = container.inventory;
+            mono.InitDepositBox();
         }
 
+        // ==========================================================================
+        // Configuration Loading
+        // ==========================================================================
         protected override void LoadDefaultConfig()
         {
             PrintWarning("Creating a new configuration file.");
-            Config["DepositItemID"] = -932201673; // Scrap Item ID
+            Config["DepositItemID"] = -932201673; 
             Config["DepositBoxSkinID"] = 3616815672;
             Config["MaxDepositLimit"] = 250000;
+            Config["EnableTeamSplitting"] = true;
+            Config["SplitWithOfflineTeammates"] = false;
             SaveConfig();
         }
 
         private void LoadConfiguration()
         {
-            DepositItemID = Convert.ToInt32(Config["DepositItemID"], CultureInfo.InvariantCulture);
-            DepositBoxSkinID = Convert.ToUInt64(Config["DepositBoxSkinID"], CultureInfo.InvariantCulture);
-            MaxDepositLimit = Convert.ToInt32(Config["MaxDepositLimit"], CultureInfo.InvariantCulture);
+            bool configUpdated = false;
+
+            T GetConfig<T>(string key, T defaultValue)
+            {
+                if (Config[key] == null)
+                {
+                    Config[key] = defaultValue;
+                    configUpdated = true;
+                }
+                return (T)Convert.ChangeType(Config[key], typeof(T));
+            }
+
+            DepositItemID = GetConfig("DepositItemID", -932201673);
+            DepositBoxSkinID = GetConfig("DepositBoxSkinID", 3616815672ul);
+            MaxDepositLimit = GetConfig("MaxDepositLimit", 250000);
+            EnableTeamSplitting = GetConfig("EnableTeamSplitting", true);
+            SplitWithOfflineTeammates = GetConfig("SplitWithOfflineTeammates", false);
+
+            if (configUpdated)
+            {
+                SaveConfig();
+                Puts("Configuration file updated with new options.");
+            }
         }
 
         // ==========================================================================
@@ -170,18 +192,15 @@ namespace Oxide.Plugins
                 return;
             }
 
-            // 1. Determine Prize Pool (Default: 100,000)
             int prizePool = 100000;
             if (args.Length > 0 && int.TryParse(args[0], out int parsedAmount))
             {
                 prizePool = parsedAmount;
             }
 
-            // 2. Generate Summary Files
             GenerateDepositSummaryFiles(prizePool);
             player.Reply($"✅ Summary files generated in 'oxide/data/{DataFolder}/' (Pool: {prizePool:N0})");
 
-            // 3. Update ServerInfo.json
             if (!File.Exists(ServerInfoPath))
             {
                 player.Reply("❌ ServerInfo.json not found. Skipping leaderboard update.");
@@ -196,7 +215,6 @@ namespace Oxide.Plugins
                     .Take(40)
                     .ToList();
 
-                // Prepare localized text lines
                 var allLines = new List<string>
                 {
                     Lang("TitleLine1", player.Id),
@@ -240,7 +258,6 @@ namespace Oxide.Plugins
                 
                 if (serverInfo["settings"] is JObject settings && settings["Tabs"] is JArray tabs)
                 {
-                    // Remove existing Leaderboard tabs
                     for (int i = tabs.Count - 1; i >= 0; i--)
                     {
                         if (tabs[i]["ButtonText"]?.ToString() == Lang("ButtonText", player.Id))
@@ -253,7 +270,6 @@ namespace Oxide.Plugins
                     File.WriteAllText(ServerInfoPath, JsonConvert.SerializeObject(serverInfo, Formatting.Indented));
                     Puts("✅ ServerInfo.json updated with 2-page leaderboard.");
 
-                    // 4. Reload ServerInfo
                     server.Command("oxide.reload ServerInfo");
                     player.Reply("✅ Leaderboard updated and ServerInfo reloaded!");
                 }
@@ -270,41 +286,34 @@ namespace Oxide.Plugins
         }
 
         // ==========================================================================
-        // Core Logic & Data Management
+        // Core Logic
         // ==========================================================================
 
         private void LoadAndMigrateData()
         {
-            // 1. Try to load the new file format: oxide/data/ScrapLeaderboard/ScrapLog.json
             string newFilePath = $"{DataFolder}/{LogFileName}";
             
-            // 2. If new file doesn't exist, check for the old one to migrate
             if (!Interface.Oxide.DataFileSystem.ExistsDatafile(newFilePath))
             {
                 if (Interface.Oxide.DataFileSystem.ExistsDatafile("DepositBoxLog"))
                 {
                     Puts("⚠️ Old data file found. Migrating 'DepositBoxLog' to 'ScrapLeaderboard/ScrapLog'...");
                     depositLog = Interface.Oxide.DataFileSystem.ReadObject<DepositLog>("DepositBoxLog");
-                    
-                    // Save immediately to new location
                     SaveDepositLog(); 
                 }
                 else
                 {
-                    // No old data, start fresh
                     depositLog = new DepositLog();
                 }
             }
             else
             {
-                // Load existing new file
                 depositLog = Interface.Oxide.DataFileSystem.ReadObject<DepositLog>(newFilePath);
             }
         }
 
         private void SaveDepositLog()
         {
-            // Saves to: oxide/data/ScrapLeaderboard/ScrapLog.json
             Interface.Oxide.DataFileSystem.WriteObject($"{DataFolder}/{LogFileName}", depositLog);
         }
 
@@ -354,26 +363,51 @@ namespace Oxide.Plugins
             File.WriteAllText(Path.Combine(dirPath, "ScrapSummary.csv"), csvBuilder.ToString());
         }
 
-        private void LogDeposit(BasePlayer player, int amount)
+        private void LogDeposit(string userId, int amount, string sourceName = null, int originalTotal = 0, int teammateCount = 0)
         {
             depositLog.Deposits.Add(new DepositEntry
             {
-                SteamId = player.UserIDString,
+                SteamId = userId,
                 Timestamp = DateTime.UtcNow.ToString("o"),
                 AmountDeposited = amount
             });
 
-            if (!playerTotalsCache.ContainsKey(player.UserIDString))
-                playerTotalsCache[player.UserIDString] = 0;
+            if (!playerTotalsCache.ContainsKey(userId))
+                playerTotalsCache[userId] = 0;
 
-            playerTotalsCache[player.UserIDString] += amount;
-            int newTotal = playerTotalsCache[player.UserIDString];
+            playerTotalsCache[userId] += amount;
+            int newTotal = playerTotalsCache[userId];
 
             SaveDepositLog();
 
-            player.ChatMessage(Lang("DepositRecorded", player.UserIDString)
-                .Replace("{amount}", amount.ToString("N0"))
-                .Replace("{total}", newTotal.ToString("N0")));
+            var player = BasePlayer.Find(userId);
+            if (player != null && player.IsConnected)
+            {
+                // Case 1: Received from someone else
+                if (sourceName != null)
+                {
+                    player.ChatMessage(Lang("DepositSplitReceived", userId)
+                        .Replace("{amount}", amount.ToString("N0"))
+                        .Replace("{source}", sourceName)
+                        .Replace("{total}", newTotal.ToString("N0")));
+                }
+                // Case 2: Deposited by self, but it was split (Requires >0 teammates)
+                else if (originalTotal > 0 && teammateCount > 0)
+                {
+                    player.ChatMessage(Lang("DepositSplitSelf", userId)
+                        .Replace("{original}", originalTotal.ToString("N0"))
+                        .Replace("{count}", teammateCount.ToString())
+                        .Replace("{amount}", amount.ToString("N0")) // The amount THEY kept
+                        .Replace("{total}", newTotal.ToString("N0")));
+                }
+                // Case 3: Deposited by self, no split (standard)
+                else
+                {
+                    player.ChatMessage(Lang("DepositRecorded", userId)
+                        .Replace("{amount}", amount.ToString("N0"))
+                        .Replace("{total}", newTotal.ToString("N0")));
+                }
+            }
         }
 
         // ==========================================================================
@@ -385,12 +419,15 @@ namespace Oxide.Plugins
             public ItemContainer container;
             public void InitDepositBox()
             {
+                if (container == null) return;
                 container.canAcceptItem += CanAcceptItem;
                 container.onItemAddedRemoved += OnItemAddedRemoved;
             }
 
             private bool CanAcceptItem(Item item, int targetPos)
             {
+                if (ScrapLeaderboard.instance == null) return false;
+
                 if (item == null || item.info == null || item.info.itemid != ScrapLeaderboard.instance.DepositItemID)
                     return false;
 
@@ -408,9 +445,9 @@ namespace Oxide.Plugins
                     int remainingAllowance = ScrapLeaderboard.instance.MaxDepositLimit - currentTotal;
                     
                     if (remainingAllowance <= 0)
-                        player.ChatMessage($"You have reached the deposit limit of {ScrapLeaderboard.instance.MaxDepositLimit:N0}. Current total: {currentTotal:N0}.");
+                        player.ChatMessage($"Limit reached: {ScrapLeaderboard.instance.MaxDepositLimit:N0}. Current: {currentTotal:N0}.");
                     else
-                        player.ChatMessage($"This deposit would exceed your limit. You can only deposit {remainingAllowance:N0} more. (Current: {currentTotal:N0}, Max: {ScrapLeaderboard.instance.MaxDepositLimit:N0})");
+                        player.ChatMessage($"Over limit. You can only deposit {remainingAllowance:N0} more.");
 
                     return false;
                 }
@@ -425,18 +462,70 @@ namespace Oxide.Plugins
 
             private void OnItemAddedRemoved(Item item, bool added)
             {
-                if (!added || item.info.itemid != ScrapLeaderboard.instance.DepositItemID) return;
+                if (ScrapLeaderboard.instance == null) return;
+                if (!added || item == null || item.info == null || item.info.itemid != ScrapLeaderboard.instance.DepositItemID) return;
 
                 if (ScrapLeaderboard.instance.depositTrack.TryGetValue(item.uid, out string playerId))
                 {
-                    ScrapLeaderboard.instance.NextTick(() =>
+                    ScrapLeaderboard.instance.timer.Once(0.1f, () =>
                     {
+                        if (ScrapLeaderboard.instance == null) return;
                         if (item == null || item.amount < 1) return;
 
-                        var player = BasePlayer.Find(playerId);
-                        if (player != null)
+                        var depositor = BasePlayer.Find(playerId);
+                        if (depositor == null)
                         {
-                            ScrapLeaderboard.instance.LogDeposit(player, item.amount);
+                            ScrapLeaderboard.instance.LogDeposit(playerId, item.amount);
+                            ScrapLeaderboard.instance.depositTrack.Remove(item.uid);
+                            item.Remove();
+                            return;
+                        }
+
+                        List<string> beneficiaries = new List<string> { depositor.UserIDString };
+
+                        // Only check for team mates if the option is ENABLED
+                        if (ScrapLeaderboard.instance.EnableTeamSplitting && depositor.Team != null)
+                        {
+                            foreach (var memberId in depositor.Team.members)
+                            {
+                                if (memberId == depositor.userID) continue;
+                                bool isEligible = ScrapLeaderboard.instance.SplitWithOfflineTeammates;
+                                
+                                if (!isEligible)
+                                {
+                                    var teammate = BasePlayer.FindByID(memberId);
+                                    if (teammate != null && teammate.IsConnected) isEligible = true;
+                                }
+
+                                if (isEligible) beneficiaries.Add(memberId.ToString());
+                            }
+                        }
+
+                        int totalAmount = item.amount;
+                        int count = beneficiaries.Count;
+                        int splitAmount = totalAmount / count;
+                        int remainder = totalAmount % count;
+
+                        foreach (var userId in beneficiaries)
+                        {
+                            int amountToLog = splitAmount;
+                            if (userId == depositor.UserIDString)
+                                amountToLog += remainder;
+
+                            if (amountToLog > 0)
+                            {
+                                if (userId == depositor.UserIDString)
+                                {
+                                    // Log for the depositor (pass original total and teammate count)
+                                    // If count is 1, (count - 1) is 0, triggering the standard "No Split" message.
+                                    ScrapLeaderboard.instance.LogDeposit(userId, amountToLog, null, totalAmount, count - 1);
+                                }
+                                else
+                                {
+                                    // Log for the teammate
+                                    ScrapLeaderboard.instance.LogDeposit(userId, amountToLog, depositor.displayName);
+                                }
+                            }
                         }
 
                         ScrapLeaderboard.instance.depositTrack.Remove(item.uid);
@@ -447,8 +536,11 @@ namespace Oxide.Plugins
 
             public void Destroy()
             {
-                container.canAcceptItem -= CanAcceptItem;
-                container.onItemAddedRemoved -= OnItemAddedRemoved;
+                if (container != null)
+                {
+                    container.canAcceptItem -= CanAcceptItem;
+                    container.onItemAddedRemoved -= OnItemAddedRemoved;
+                }
                 UnityEngine.Object.Destroy(this);
             }
         }
@@ -470,9 +562,8 @@ namespace Oxide.Plugins
         }
 
         // ==========================================================================
-        // Data & Localization
+        // Localization
         // ==========================================================================
-
         private string Lang(string key, string id = null) => lang.GetMessage(key, this, id);
 
         protected override void LoadDefaultMessages()
@@ -481,7 +572,9 @@ namespace Oxide.Plugins
             {
                 ["NoPermission"] = "You do not have permission to place this box.",
                 ["BoxGiven"] = "You have received a Deposit Box.",
-                ["DepositRecorded"] = "Your deposit of {amount} scrap has been recorded successfully. You have deposited a total of {total}.",
+                ["DepositRecorded"] = "Deposit: {amount} scrap. Total: {total}.",
+                ["DepositSplitReceived"] = "Received split deposit: {amount} scrap from {source}. Total: {total}.",
+                ["DepositSplitSelf"] = "You deposited {original} scrap. It was split with {count} teammate(s) ({amount} each). Your Total: {total}.",
                 ["ButtonText"] = "Leaderboard",
                 ["HeaderText"] = "Top Scrap Depositors",
                 ["TitleLine1"] = "🏆 Top Scrap Depositors This Wipe",
