@@ -35,7 +35,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ScrapLeaderboard", "Orangemart", "2.3.0")]
+    [Info("ScrapLeaderboard", "Orangemart", "2.4.0")]
     [Description("Handles scrap deposits, enforces limits, and updates the ServerInfo leaderboard.")]
     public class ScrapLeaderboard : CovalencePlugin
     {
@@ -415,135 +415,222 @@ namespace Oxide.Plugins
         // ==========================================================================
 
         public class DepositBoxRestriction : FacepunchBehaviour
+{
+    public ItemContainer container;
+    
+    public void InitDepositBox()
+    {
+        if (container == null) return;
+        container.canAcceptItem += CanAcceptItem;
+        container.onItemAddedRemoved += OnItemAddedRemoved;
+    }
+
+    // --- NEW HELPER METHODS ---
+    private int GetPlayerTotal(string userId)
+    {
+        if (ScrapLeaderboard.instance.playerTotalsCache.TryGetValue(userId, out int total))
+            return total;
+        return 0;
+    }
+
+    private int GetPlayerCapacity(string userId)
+    {
+        return Math.Max(0, ScrapLeaderboard.instance.MaxDepositLimit - GetPlayerTotal(userId));
+    }
+
+    private int GetTeamCapacity(BasePlayer depositor)
+    {
+        int capacity = GetPlayerCapacity(depositor.UserIDString);
+        if (!ScrapLeaderboard.instance.EnableTeamSplitting || depositor.Team == null) 
+            return capacity;
+
+        foreach (var memberId in depositor.Team.members)
         {
-            public ItemContainer container;
-            public void InitDepositBox()
+            if (memberId == depositor.userID) continue;
+            bool isEligible = ScrapLeaderboard.instance.SplitWithOfflineTeammates;
+            
+            if (!isEligible)
             {
-                if (container == null) return;
-                container.canAcceptItem += CanAcceptItem;
-                container.onItemAddedRemoved += OnItemAddedRemoved;
+                var teammate = BasePlayer.FindByID(memberId);
+                if (teammate != null && teammate.IsConnected) isEligible = true;
             }
 
-            private bool CanAcceptItem(Item item, int targetPos)
+            if (isEligible)
             {
-                if (ScrapLeaderboard.instance == null) return false;
-
-                if (item == null || item.info == null || item.info.itemid != ScrapLeaderboard.instance.DepositItemID)
-                    return false;
-
-                var player = item.GetOwnerPlayer();
-                if (player == null) return false;
-
-                int currentTotal = 0;
-                if (ScrapLeaderboard.instance.playerTotalsCache.TryGetValue(player.UserIDString, out int total))
-                {
-                    currentTotal = total;
-                }
-
-                if (currentTotal + item.amount > ScrapLeaderboard.instance.MaxDepositLimit)
-                {
-                    int remainingAllowance = ScrapLeaderboard.instance.MaxDepositLimit - currentTotal;
-                    
-                    if (remainingAllowance <= 0)
-                        player.ChatMessage($"Limit reached: {ScrapLeaderboard.instance.MaxDepositLimit:N0}. Current: {currentTotal:N0}.");
-                    else
-                        player.ChatMessage($"Over limit. You can only deposit {remainingAllowance:N0} more.");
-
-                    return false;
-                }
-
-                if (ScrapLeaderboard.instance.depositTrack.ContainsKey(item.uid))
-                    ScrapLeaderboard.instance.depositTrack[item.uid] = player.UserIDString;
-                else
-                    ScrapLeaderboard.instance.depositTrack.Add(item.uid, player.UserIDString);
-
-                return true;
-            }
-
-            private void OnItemAddedRemoved(Item item, bool added)
-            {
-                if (ScrapLeaderboard.instance == null) return;
-                if (!added || item == null || item.info == null || item.info.itemid != ScrapLeaderboard.instance.DepositItemID) return;
-
-                if (ScrapLeaderboard.instance.depositTrack.TryGetValue(item.uid, out string playerId))
-                {
-                    ScrapLeaderboard.instance.timer.Once(0.1f, () =>
-                    {
-                        if (ScrapLeaderboard.instance == null) return;
-                        if (item == null || item.amount < 1) return;
-
-                        var depositor = BasePlayer.Find(playerId);
-                        if (depositor == null)
-                        {
-                            ScrapLeaderboard.instance.LogDeposit(playerId, item.amount);
-                            ScrapLeaderboard.instance.depositTrack.Remove(item.uid);
-                            item.Remove();
-                            return;
-                        }
-
-                        List<string> beneficiaries = new List<string> { depositor.UserIDString };
-
-                        // Only check for team mates if the option is ENABLED
-                        if (ScrapLeaderboard.instance.EnableTeamSplitting && depositor.Team != null)
-                        {
-                            foreach (var memberId in depositor.Team.members)
-                            {
-                                if (memberId == depositor.userID) continue;
-                                bool isEligible = ScrapLeaderboard.instance.SplitWithOfflineTeammates;
-                                
-                                if (!isEligible)
-                                {
-                                    var teammate = BasePlayer.FindByID(memberId);
-                                    if (teammate != null && teammate.IsConnected) isEligible = true;
-                                }
-
-                                if (isEligible) beneficiaries.Add(memberId.ToString());
-                            }
-                        }
-
-                        int totalAmount = item.amount;
-                        int count = beneficiaries.Count;
-                        int splitAmount = totalAmount / count;
-                        int remainder = totalAmount % count;
-
-                        foreach (var userId in beneficiaries)
-                        {
-                            int amountToLog = splitAmount;
-                            if (userId == depositor.UserIDString)
-                                amountToLog += remainder;
-
-                            if (amountToLog > 0)
-                            {
-                                if (userId == depositor.UserIDString)
-                                {
-                                    // Log for the depositor (pass original total and teammate count)
-                                    // If count is 1, (count - 1) is 0, triggering the standard "No Split" message.
-                                    ScrapLeaderboard.instance.LogDeposit(userId, amountToLog, null, totalAmount, count - 1);
-                                }
-                                else
-                                {
-                                    // Log for the teammate
-                                    ScrapLeaderboard.instance.LogDeposit(userId, amountToLog, depositor.displayName);
-                                }
-                            }
-                        }
-
-                        ScrapLeaderboard.instance.depositTrack.Remove(item.uid);
-                        item.Remove();
-                    });
-                }
-            }
-
-            public void Destroy()
-            {
-                if (container != null)
-                {
-                    container.canAcceptItem -= CanAcceptItem;
-                    container.onItemAddedRemoved -= OnItemAddedRemoved;
-                }
-                UnityEngine.Object.Destroy(this);
+                capacity += GetPlayerCapacity(memberId.ToString());
             }
         }
+        return capacity;
+    }
+    // --------------------------
+
+    private bool CanAcceptItem(Item item, int targetPos)
+    {
+        if (ScrapLeaderboard.instance == null) return false;
+
+        if (item == null || item.info == null || item.info.itemid != ScrapLeaderboard.instance.DepositItemID)
+            return false;
+
+        var player = item.GetOwnerPlayer();
+        if (player == null) return false;
+
+        // Check if the team as a whole has ANY capacity left.
+        // If they do, we let it in and handle partial refunds in OnItemAddedRemoved.
+        int teamCapacity = GetTeamCapacity(player);
+        if (teamCapacity <= 0)
+{
+    player.ChatMessage(ScrapLeaderboard.instance.Lang("TeamLimitReached", player.UserIDString));
+    return false;
+}
+
+        if (ScrapLeaderboard.instance.depositTrack.ContainsKey(item.uid))
+            ScrapLeaderboard.instance.depositTrack[item.uid] = player.UserIDString;
+        else
+            ScrapLeaderboard.instance.depositTrack.Add(item.uid, player.UserIDString);
+
+        return true;
+    }
+
+    private void OnItemAddedRemoved(Item item, bool added)
+    {
+        if (ScrapLeaderboard.instance == null) return;
+        if (!added || item == null || item.info == null || item.info.itemid != ScrapLeaderboard.instance.DepositItemID) return;
+
+        if (ScrapLeaderboard.instance.depositTrack.TryGetValue(item.uid, out string playerId))
+        {
+            ScrapLeaderboard.instance.timer.Once(0.1f, () =>
+            {
+                if (ScrapLeaderboard.instance == null) return;
+                if (item == null || item.amount < 1) return;
+
+                var depositor = BasePlayer.Find(playerId);
+                if (depositor == null)
+                {
+                    // Fallback if depositor disconnects during the 0.1s delay
+                    int cap = GetPlayerCapacity(playerId);
+                    int logAmt = Math.Min(item.amount, cap);
+                    if (logAmt > 0) ScrapLeaderboard.instance.LogDeposit(playerId, logAmt);
+                    
+                    ScrapLeaderboard.instance.depositTrack.Remove(item.uid);
+                    item.Remove();
+                    return;
+                }
+
+                List<string> beneficiaries = new List<string> { depositor.UserIDString };
+
+                if (ScrapLeaderboard.instance.EnableTeamSplitting && depositor.Team != null)
+                {
+                    foreach (var memberId in depositor.Team.members)
+                    {
+                        if (memberId == depositor.userID) continue;
+                        bool isEligible = ScrapLeaderboard.instance.SplitWithOfflineTeammates;
+                        
+                        if (!isEligible)
+                        {
+                            var teammate = BasePlayer.FindByID(memberId);
+                            if (teammate != null && teammate.IsConnected) isEligible = true;
+                        }
+
+                        if (isEligible) beneficiaries.Add(memberId.ToString());
+                    }
+                }
+
+                int totalAmount = item.amount;
+                int count = beneficiaries.Count;
+                int baseSplit = totalAmount / count;
+                int remainder = totalAmount % count;
+
+                int overflowPool = 0;
+                Dictionary<string, int> allocations = new Dictionary<string, int>();
+
+                // PASS 1: Allocate up to limits and gather excess into the overflow pool
+                foreach (var userId in beneficiaries)
+                {
+                    int intendedAmount = baseSplit;
+                    if (userId == depositor.UserIDString) intendedAmount += remainder;
+
+                    int allowance = GetPlayerCapacity(userId);
+
+                    if (intendedAmount > allowance)
+                    {
+                        allocations[userId] = allowance;
+                        overflowPool += (intendedAmount - allowance); // Send excess back to depositor's pool
+                    }
+                    else
+                    {
+                        allocations[userId] = intendedAmount;
+                    }
+                }
+
+                // PASS 2: Re-allocate overflow pool back to the depositor
+                int physicalRefund = 0;
+                if (overflowPool > 0)
+                {
+                    int depositorCurrentAllocation = allocations[depositor.UserIDString];
+                    int depositorTotal = GetPlayerTotal(depositor.UserIDString);
+                    int depositorRemainingCapacity = ScrapLeaderboard.instance.MaxDepositLimit - (depositorTotal + depositorCurrentAllocation);
+
+                    if (overflowPool > depositorRemainingCapacity)
+                    {
+                        // Depositor also hit their limit. Refund the rest as physical scrap.
+                        allocations[depositor.UserIDString] += Math.Max(0, depositorRemainingCapacity);
+                        physicalRefund = overflowPool - Math.Max(0, depositorRemainingCapacity);
+                    }
+                    else
+                    {
+                        // Depositor absorbs the teammates' excess
+                        allocations[depositor.UserIDString] += overflowPool;
+                    }
+                }
+
+                // Log all valid allocations
+                foreach (var kvp in allocations)
+                {
+                    string userId = kvp.Key;
+                    int amountToLog = kvp.Value;
+
+                    if (amountToLog > 0)
+                    {
+                        if (userId == depositor.UserIDString)
+                        {
+                            ScrapLeaderboard.instance.LogDeposit(userId, amountToLog, null, totalAmount - physicalRefund, count - 1);
+                        }
+                        else
+                        {
+                            ScrapLeaderboard.instance.LogDeposit(userId, amountToLog, depositor.displayName);
+                        }
+                    }
+                }
+
+                // Return un-depositable scrap back to the player's inventory
+                if (physicalRefund > 0)
+{
+    Item refundItem = ItemManager.CreateByItemID(ScrapLeaderboard.instance.DepositItemID, physicalRefund);
+    if (refundItem != null)
+    {
+        depositor.GiveItem(refundItem);
+        string refundMsg = ScrapLeaderboard.instance.Lang("DepositRefunded", depositor.UserIDString)
+                                            .Replace("{refund}", physicalRefund.ToString("N0"));
+        depositor.ChatMessage(refundMsg);
+    }
+}
+
+                ScrapLeaderboard.instance.depositTrack.Remove(item.uid);
+                item.Remove();
+            });
+        }
+    }
+
+    public void Destroy()
+    {
+        if (container != null)
+        {
+            container.canAcceptItem -= CanAcceptItem;
+            container.onItemAddedRemoved -= OnItemAddedRemoved;
+        }
+        UnityEngine.Object.Destroy(this);
+    }
+}
 
         private class DepositLog
         {
@@ -564,22 +651,29 @@ namespace Oxide.Plugins
         // ==========================================================================
         // Localization
         // ==========================================================================
-        private string Lang(string key, string id = null) => lang.GetMessage(key, this, id);
+        public string Lang(string key, string id = null) => lang.GetMessage(key, this, id);
 
         protected override void LoadDefaultMessages()
-        {
-            lang.RegisterMessages(new Dictionary<string, string>
-            {
-                ["NoPermission"] = "You do not have permission to place this box.",
-                ["BoxGiven"] = "You have received a Deposit Box.",
-                ["DepositRecorded"] = "Deposit: {amount} scrap. Total: {total}.",
-                ["DepositSplitReceived"] = "Received split deposit: {amount} scrap from {source}. Total: {total}.",
-                ["DepositSplitSelf"] = "You deposited {original} scrap. It was split with {count} teammate(s) ({amount} each). Your Total: {total}.",
-                ["ButtonText"] = "Leaderboard",
-                ["HeaderText"] = "Top Scrap Depositors",
-                ["TitleLine1"] = "🏆 Top Scrap Depositors This Wipe",
-                ["TitleLine2"] = "Total Deposited: {0} scrap"
-            }, this, "en");
-        }
+{
+    lang.RegisterMessages(new Dictionary<string, string>
+    {
+        ["NoPermission"] = "You do not have permission to place this box.",
+        ["BoxGiven"] = "You have received a Deposit Box.",
+        ["DepositRecorded"] = "Deposit: {amount} scrap. Total: {total}.",
+        ["DepositSplitReceived"] = "Received split deposit: {amount} scrap from {source}. Total: {total}.",
+        
+        // Updated to reflect that the depositor might have absorbed overflow
+        ["DepositSplitSelf"] = "You deposited {original} scrap. Split with {count} teammate(s). You were credited {amount}. Your Total: {total}.",
+        
+        // New messages for the dynamic limits & refunds
+        ["TeamLimitReached"] = "Limit reached. You and your eligible teammates have hit the maximum deposit limit.",
+        ["DepositRefunded"] = "Partial limit reached. Returned {refund} scrap to your inventory.",
+        
+        ["ButtonText"] = "Leaderboard",
+        ["HeaderText"] = "Top Scrap Depositors",
+        ["TitleLine1"] = "🏆 Top Scrap Depositors This Wipe",
+        ["TitleLine2"] = "Total Deposited: {0} scrap"
+    }, this, "en");
+}
     }
 }
