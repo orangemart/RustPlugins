@@ -1,13 +1,15 @@
 /*
 ================================================================================================
   ScrapLeaderboard
-  Version: 2.4.1
+  Version: 2.4.2
   Author: Orangemart
 ================================================================================================
 
   OVERVIEW:
   This plugin handles scrap deposits, enforces real-time limits, logs transactions, 
   and updates the ServerInfo leaderboard automatically.
+  UPDATES v2.4.1
+  - perf: optimize data saving and prevent chat message spam
 
   UPDATES v2.4.1:
   - FIXED: Duplication exploit caused by rapid-fire hooks queueing multiple timers.
@@ -38,7 +40,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ScrapLeaderboard", "Orangemart", "2.4.1")]
+    [Info("ScrapLeaderboard", "Orangemart", "2.4.2")]
     [Description("Handles scrap deposits, enforces limits, and updates the ServerInfo leaderboard.")]
     public class ScrapLeaderboard : CovalencePlugin
     {
@@ -61,6 +63,7 @@ namespace Oxide.Plugins
         // Data Paths
         private const string DataFolder = "ScrapLeaderboard";
         private const string LogFileName = "ScrapLog"; 
+        private bool saveQueued = false;
 
         // ==========================================================================
         // Data Structures
@@ -68,7 +71,7 @@ namespace Oxide.Plugins
         private DepositLog depositLog;
         private Dictionary<ItemId, string> depositTrack = new Dictionary<ItemId, string>();
         public Dictionary<string, int> playerTotalsCache = new Dictionary<string, int>();
-
+		public Dictionary<string, float> lastLimitMessageTime = new Dictionary<string, float>();
         public static ScrapLeaderboard instance;
 
         // ==========================================================================
@@ -105,6 +108,8 @@ namespace Oxide.Plugins
 
         void Unload()
         {
+        	Interface.Oxide.DataFileSystem.WriteObject($"{DataFolder}/{LogFileName}", depositLog);
+            
             var boxes = UnityEngine.Object.FindObjectsOfType<DepositBoxRestriction>();
             foreach (var box in boxes)
             {
@@ -112,7 +117,13 @@ namespace Oxide.Plugins
             }
             instance = null;
         }
-
+        
+        void OnServerSave()
+		{
+   			// Add this hook to save the data whenever the Rust server saves its map
+    		Interface.Oxide.DataFileSystem.WriteObject($"{DataFolder}/{LogFileName}", depositLog);
+		}
+        
         void OnEntitySpawned(StorageContainer container)
         {
             if (container == null || container.skinID != DepositBoxSkinID) return;
@@ -315,10 +326,18 @@ namespace Oxide.Plugins
             }
         }
 
-        private void SaveDepositLog()
-        {
-            Interface.Oxide.DataFileSystem.WriteObject($"{DataFolder}/{LogFileName}", depositLog);
-        }
+		private void SaveDepositLog()
+		{
+   			if (saveQueued) return;
+    		saveQueued = true;
+
+    		// Wait 5 seconds before actually writing to disk
+    		timer.Once(5f, () =>
+    		{
+        		Interface.Oxide.DataFileSystem.WriteObject($"{DataFolder}/{LogFileName}", depositLog);
+        		saveQueued = false;
+    		});
+		}
 
         private void RecalculateTotals()
         {
@@ -478,13 +497,20 @@ namespace Oxide.Plugins
                 if (player == null) return false;
 
                 // Check if the team as a whole has ANY capacity left.
-                // If they do, we let it in and handle partial refunds in OnItemAddedRemoved.
-                int teamCapacity = GetTeamCapacity(player);
-                if (teamCapacity <= 0)
-                {
-                    player.ChatMessage(ScrapLeaderboard.instance.Lang("TeamLimitReached", player.UserIDString));
-                    return false;
-                }
+				// If they do, we let it in and handle partial refunds in OnItemAddedRemoved.
+				int teamCapacity = GetTeamCapacity(player);
+				if (teamCapacity <= 0)
+				{
+ 					float currentTime = UnityEngine.Time.realtimeSinceStartup;
+    
+ 					// Check if the player is in the dictionary, and if 2 seconds have passed since the last message
+    				if (!ScrapLeaderboard.instance.lastLimitMessageTime.TryGetValue(player.UserIDString, out float lastTime) || currentTime - lastTime > 2f)
+   					{
+      					player.ChatMessage(ScrapLeaderboard.instance.Lang("TeamLimitReached", player.UserIDString));
+     					ScrapLeaderboard.instance.lastLimitMessageTime[player.UserIDString] = currentTime;
+ 					}
+  					return false;
+				}
 
                 if (ScrapLeaderboard.instance.depositTrack.ContainsKey(item.uid))
                     ScrapLeaderboard.instance.depositTrack[item.uid] = player.UserIDString;
