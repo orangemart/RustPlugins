@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "2.0.6")]
+    [Info("Team Skins", "Orangemart", "2.0.7")]
     [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
@@ -355,45 +355,41 @@ namespace Oxide.Plugins
                 var originalItem = box.GetSlot(0);
                 if (originalItem != null)
                 {
-                    // Check if this is a "Redirect" (Item Definition Change)
                     bool isRedirect = item.info.shortname != originalItem.info.shortname;
 
-                    if (isRedirect)
+                    // Defer the inventory manipulation to the next frame to prevent RPC errors
+                    NextFrame(() =>
                     {
-                        // SCENARIO A: Redirect (Must adopt the ghost item)
-                        TransferItemProps(originalItem, item);
-                        
-                        if (!item.MoveToContainer(player.inventory.containerMain))
-                            item.MoveToContainer(player.inventory.containerBelt);
-                            
-                        SafeRemoveItem(originalItem);
-                    }
-                    else
-                    {
-                        // SCENARIO B: Simple Skin (Modify the original)
-                        originalItem.skin = item.skin;
-                        originalItem.MarkDirty(); // Update icon
-                        
-                        // Force Update Held Entity
-                        var heldEntity = originalItem.GetHeldEntity();
-                        if (heldEntity != null)
+                        if (originalItem == null || !originalItem.IsValid()) return;
+
+                        if (isRedirect)
                         {
-                            heldEntity.skinID = item.skin;
-                            heldEntity.SendNetworkUpdate();
+                            // SCENARIO A: Redirect
+                            TransferItemProps(originalItem, item);
+                            player.GiveItem(item);
+                            originalItem.Remove();
+                        }
+                        else
+                        {
+                            // SCENARIO B: Simple Skin
+                            originalItem.skin = item.skin;
+                            originalItem.MarkDirty(); 
+
+                            var heldEntity = originalItem.GetHeldEntity();
+                            if (heldEntity != null)
+                            {
+                                heldEntity.skinID = item.skin;
+                                heldEntity.SendNetworkUpdate();
+                            }
+
+                            player.GiveItem(originalItem);
                         }
 
-                        // Force Move ORIGINAL to player
-                        if (!originalItem.MoveToContainer(player.inventory.containerMain))
-                            originalItem.MoveToContainer(player.inventory.containerBelt);
-                    }
-
-                    player.ChatMessage($"Skin Applied! ({item.info.displayName.translated})");
-                    
-                    NextFrame(() => {
+                        player.ChatMessage($"Skin Applied! ({item.info.displayName.translated})");
                         if (player.IsConnected) player.EndLooting();
                     });
-                    
-                    return false; 
+
+                    return false; // Safely block the client's native drag/drop attempt
                 }
             }
 
@@ -431,28 +427,7 @@ namespace Oxide.Plugins
         private void SafeRemoveItem(Item item)
         {
             if (item == null) return;
-
-            if (item.uid.IsValid && Net.sv != null)
-            {
-                Net.sv.ReturnUID(item.uid.Value);
-                item.uid = default(ItemId);
-            }
-
-            if (item.contents != null)
-            {
-                for (var i = item.contents.itemList.Count - 1; i >= 0; i--)
-                {
-                    SafeRemoveItem(item.contents.itemList[i]);
-                }
-                item.contents = null;
-            }
-
-            item.RemoveFromWorld();
-            item.parent = null;
-
-            var heldEntity = item.GetHeldEntity();
-            if (heldEntity != null && heldEntity.IsValid() && !heldEntity.IsDestroyed)
-                heldEntity.Kill();
+            item.Remove(); 
         }
 
         private void TransferItemProps(Item source, Item destination)
