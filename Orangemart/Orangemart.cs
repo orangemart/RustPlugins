@@ -13,7 +13,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Orangemart", "RustySats Orangemart", "0.5.1")]
+    [Info("Orangemart", "RustySats Orangemart", "0.5.2")]
     [Description("Allows players to buy and sell in-game units and VIP status using Bitcoin Lightning Network payments via LNbits with WebSocket support and comprehensive protection features")]
     public class Orangemart : CovalencePlugin
     {
@@ -50,6 +50,7 @@ namespace Oxide.Plugins
             // Discord
             public const string DiscordChannelName = "DiscordChannelName";
             public const string DiscordWebhookUrl = "DiscordWebhookUrl";
+            public const string AdminDiscordWebhookUrl = "AdminDiscordWebhookUrl"; // NEW: Admin Webhook
 
             // InvoiceSettings
             public const string BlacklistedDomains = "BlacklistedDomains";
@@ -78,6 +79,7 @@ namespace Oxide.Plugins
         private int satsPerCurrencyUnit;
         private int pricePerCurrencyUnit;
         private string discordChannelName;
+        private string adminDiscordWebhookUrl; // NEW
         private ulong currencySkinID;
         private int checkIntervalSeconds;
         private int invoiceTimeoutSeconds;
@@ -237,10 +239,10 @@ namespace Oxide.Plugins
             public string RHash { get; set; }
             public IPlayer Player { get; set; }
             public int Amount { get; set; }
+            public int SatsAmount { get; set; } // NEW: Helps accurately log the ₿ amount
             public string Memo { get; set; }
             public DateTime CreatedAt { get; set; }
             public PurchaseType Type { get; set; }
-            // NEW: Store the Discord Message ID
             public string DiscordMessageId { get; set; } 
         }
 
@@ -304,6 +306,7 @@ namespace Oxide.Plugins
 
                 // Parse Discord Settings
                 discordChannelName = GetConfigValue(ConfigSections.Discord, ConfigKeys.DiscordChannelName, "mart", ref configChanged);
+                adminDiscordWebhookUrl = GetConfigValue(ConfigSections.Discord, ConfigKeys.AdminDiscordWebhookUrl, "", ref configChanged); // NEW
 
                 // Parse Invoice Settings
                 checkIntervalSeconds = GetConfigValue(ConfigSections.InvoiceSettings, ConfigKeys.CheckIntervalSeconds, 10, ref configChanged);
@@ -395,7 +398,8 @@ namespace Oxide.Plugins
             Config[ConfigSections.Discord] = new Dictionary<string, object>
             {
                 [ConfigKeys.DiscordChannelName] = "mart",
-                [ConfigKeys.DiscordWebhookUrl] = "https://discord.com/api/webhooks/your_webhook_url"
+                [ConfigKeys.DiscordWebhookUrl] = "https://discord.com/api/webhooks/your_webhook_url",
+                [ConfigKeys.AdminDiscordWebhookUrl] = "" // NEW
             };
 
             Config[ConfigSections.InvoiceSettings] = new Dictionary<string, object>
@@ -601,7 +605,7 @@ namespace Oxide.Plugins
                 ["FailedToFindBasePlayer"] = "Failed to find base player object for player {0}.",
                 ["FailedToCreateCurrencyItem"] = "Failed to create {0} item for player {1}.",
                 ["AddedToVipGroup"] = "Player {0} added to VIP group '{1}'.",
-                ["InvoiceExpired"] = "Your invoice for {0} sats has expired. Please try again.",
+                ["InvoiceExpired"] = "Your invoice for ₿{0} has expired. Please try again.",
                 ["BlacklistedDomain"] = "The domain '{0}' is currently blacklisted.",
                 ["NotWhitelistedDomain"] = "The domain '{0}' is not whitelisted. Allowed: {1}.",
                 ["InvalidLightningAddress"] = "The Lightning Address provided is invalid.",
@@ -633,8 +637,6 @@ namespace Oxide.Plugins
         {
             if (!useWebSockets) return;
 
-            // Only use WebSockets for Incoming payments (Buy/VIP)
-            // Outgoing payments (Send) are handled via immediate check + polling
             if (invoice.Type == PurchaseType.SendBitcoin) return;
 
             var wsConnection = new WebSocketConnection
@@ -751,9 +753,6 @@ namespace Oxide.Plugins
 
                 if (confirmed)
                 {
-                    Puts($"[WebSocket] Payment confirmed for {connection.InvoiceKey}");
-                    
-                    // CRITICAL FIX: Dispatch to Main Thread
                     Interface.Oxide.NextTick(() => {
                         ProcessPaymentConfirmation(connection.Invoice);
                     });
@@ -769,12 +768,14 @@ namespace Oxide.Plugins
 
         private void ProcessPaymentConfirmation(PendingInvoice invoice)
         {
-            // CRITICAL: Prevent Race Conditions / Double Processing
             if (!pendingInvoices.Contains(invoice)) return;
 
             pendingInvoices.Remove(invoice);
             
-            Puts($"[ProcessPayment] Processing payment confirmation for {invoice.RHash}, Type: {invoice.Type}");
+            // NEW: Improved logging info with Player Name and Amount
+            string logMsg = $"Processing payment confirmation for {invoice.Player.Name} (Amount: ₿{invoice.SatsAmount}). Hash: {invoice.RHash}, Type: {invoice.Type}";
+            Puts($"[ProcessPayment] {logMsg}");
+            SendAdminNotification("Payment Confirmed", logMsg, 3066993); // Green color
 
             switch (invoice.Type)
             {
@@ -857,7 +858,9 @@ namespace Oxide.Plugins
             string transactionId = GenerateTransactionId();
             LogBuyInvoice(CreateBuyInvoiceLogEntry(player, null, false, amountSats, PurchaseType.Currency, 0));
 
-            CreateInvoice(amountSats, $"Buying {amount} {currencyName}", invoiceResponse =>
+            // NEW: Adding Player Name to the LNbits Memo
+            string memo = $"[Orangemart] {player.Name} buying {amount} {currencyName}";
+            CreateInvoice(amountSats, memo, invoiceResponse =>
             {
                 if (invoiceResponse != null)
                 {
@@ -870,13 +873,14 @@ namespace Oxide.Plugins
                         RHash = invoiceResponse.PaymentHash.ToLower(),
                         Player = player,
                         Amount = amount,
-                        Memo = $"Buying {amount} {currencyName}",
+                        SatsAmount = amountSats,
+                        Memo = memo,
                         CreatedAt = DateTime.UtcNow,
                         Type = PurchaseType.Currency
                     };
                     pendingInvoices.Add(pendingInvoice);
                     
-                    SendInvoiceToDiscord(player, invoiceResponse.PaymentRequest, amountSats, $"Buying {amount} {currencyName}", pendingInvoice);
+                    SendInvoiceToDiscord(player, invoiceResponse.PaymentRequest, amountSats, memo, pendingInvoice);
 
                     Task.Run(async () => await ConnectWebSocket(pendingInvoice));
                     ScheduleInvoiceExpiry(pendingInvoice);
@@ -914,7 +918,6 @@ namespace Oxide.Plugins
             var basePlayer = player.Object as BasePlayer;
             if (basePlayer == null) return;
 
-            // Optimized Inventory Check
             if (!TryTakeCurrency(basePlayer, amount))
             {
                 player.Reply(Lang("NeedMoreCurrency", player.Id, currencyName, amount));
@@ -947,24 +950,25 @@ namespace Oxide.Plugins
                         RHash = paymentHash.ToLower(),
                         Player = player,
                         Amount = satsAmount,
+                        SatsAmount = satsAmount,
                         Memo = $"Sending {amount} {currencyName} to {lightningAddress}",
                         CreatedAt = DateTime.UtcNow,
                         Type = PurchaseType.SendBitcoin
                     };
                     
                     pendingInvoices.Add(pendingInvoice);
-                    Puts($"Outbound payment to {lightningAddress} initiated. PaymentHash: {paymentHash}");
+                    
+                    // NEW: Better Logging & Admin Discord Notification for Outbound Sends
+                    string logMsg = $"Outbound payment to {lightningAddress} initiated by {player.Name} for ₿{satsAmount}. PaymentHash: {paymentHash}";
+                    Puts(logMsg);
+                    SendAdminNotification("Outbound Payment Initiated", logMsg, 16753920); // Orange color
 
-                    // CRITICAL FIX: Don't use WebSockets for sends. Check HTTP immediately.
-                    // If it's already done, process it now. If not, the timer will catch it.
                     CheckInvoicePaid(paymentHash, isPaid => 
                     {
                         if (isPaid)
                         {
-                            // Ensure ProcessPaymentConfirmation runs safely (it already checks list containment)
                             ProcessPaymentConfirmation(pendingInvoice);
                         }
-                        // Else: Fall through to CheckPendingInvoices timer
                     });
                 }
                 else
@@ -990,7 +994,9 @@ namespace Oxide.Plugins
             string transactionId = GenerateTransactionId();
             LogBuyInvoice(CreateBuyInvoiceLogEntry(player, null, false, amountSats, PurchaseType.Vip, 0));
 
-            CreateInvoice(amountSats, "Buying VIP Status", invoiceResponse =>
+            // NEW: Adding Player Name to the LNbits Memo
+            string memo = $"[Orangemart] {player.Name} buying VIP Status";
+            CreateInvoice(amountSats, memo, invoiceResponse =>
             {
                 if (invoiceResponse != null)
                 {
@@ -1003,13 +1009,14 @@ namespace Oxide.Plugins
                         RHash = invoiceResponse.PaymentHash.ToLower(),
                         Player = player,
                         Amount = amountSats,
-                        Memo = "Buying VIP Status",
+                        SatsAmount = amountSats,
+                        Memo = memo,
                         CreatedAt = DateTime.UtcNow,
                         Type = PurchaseType.Vip
                     };
                     pendingInvoices.Add(pendingInvoice);
 
-                    SendInvoiceToDiscord(player, invoiceResponse.PaymentRequest, amountSats, "Buying VIP Status", pendingInvoice);
+                    SendInvoiceToDiscord(player, invoiceResponse.PaymentRequest, amountSats, memo, pendingInvoice);
                     
                     Task.Run(async () => await ConnectWebSocket(pendingInvoice));
                     ScheduleInvoiceExpiry(pendingInvoice);
@@ -1028,43 +1035,25 @@ namespace Oxide.Plugins
             player.ChatMessage(Lang("ProtectionLimits", player.UserIDString, maxPurchaseAmount, maxSendAmount, commandCooldownSeconds));
         }
 
-        // OPTIMIZED INVENTORY HELPER
         private bool TryTakeCurrency(BasePlayer player, int amount)
         {
-            // Create a list to hold the collected items
             var collected = new List<Item>();
-            
-            // Take items from the player's inventory
             int taken = player.inventory.Take(collected, currencyItemID, amount);
             
             if (taken == amount)
             {
-                // Success! We found enough items.
-                // Since we are "using" them for payment, we destroy them.
-                foreach (var item in collected)
-                {
-                    item.Remove();
-                }
+                foreach (var item in collected) item.Remove();
                 return true;
             }
 
-            // Failure! We didn't find enough.
-            // Return the items we managed to take back to the player.
             foreach (var item in collected)
             {
-                // Call the method directly (don't check if true/false)
                 player.GiveItem(item);
-                
-                // Check if the item failed to find a parent (inventory full)
-                if (item.parent == null)
-                {
-                    item.Drop(player.transform.position + new UnityEngine.Vector3(0f, 1.5f, 0f), UnityEngine.Vector3.zero);
-                }
+                if (item.parent == null) item.Drop(player.transform.position + new UnityEngine.Vector3(0f, 1.5f, 0f), UnityEngine.Vector3.zero);
             }
             return false;
         }
 
-        // Fallback HTTP polling for when WebSockets are disabled or fail
         private void CheckPendingInvoices()
         {
             var currentInvoices = pendingInvoices.ToList();
@@ -1084,7 +1073,6 @@ namespace Oxide.Plugins
                         if (!retryCounts.ContainsKey(localPaymentHash)) retryCounts[localPaymentHash] = 0;
                         retryCounts[localPaymentHash]++;
 
-                        // IF MAX RETRIES HIT: Call the centralized expiry
                         if (retryCounts[localPaymentHash] >= maxRetries)
                         {
                             ExpireInvoice(invoice, "Max Retries Reached");
@@ -1142,7 +1130,6 @@ namespace Oxide.Plugins
         {
             timer.Once(invoiceTimeoutSeconds, () =>
             {
-                // Only expire if it hasn't already been removed by the loop
                 if (pendingInvoices.Contains(pendingInvoice))
                 {
                     ExpireInvoice(pendingInvoice, "Timeout Timer");
@@ -1253,7 +1240,6 @@ namespace Oxide.Plugins
             {
                 if (currencySkinID > 0) currencyItem.skin = currencySkinID;
                 
-                // Fixed logic: Call GiveItem, then check if parent is null
                 basePlayer.GiveItem(currencyItem);
 
                 if (currencyItem.parent == null)
@@ -1283,7 +1269,6 @@ namespace Oxide.Plugins
             {
                 if (currencySkinID > 0) returnedCurrency.skin = currencySkinID;
                 
-                // Fixed logic: Call GiveItem, then check if parent is null (meaning it failed to enter inventory)
                 player.GiveItem(returnedCurrency);
                 
                 if (returnedCurrency.parent == null)
@@ -1294,7 +1279,6 @@ namespace Oxide.Plugins
             }
         }
 
-        // Logging Helpers
         private void LogSellTransaction(SellInvoiceLogEntry logEntry)
         {
             var logs = LoadSellLogData();
@@ -1403,6 +1387,29 @@ namespace Oxide.Plugins
             };
         }
 
+        // NEW: Admin helper notification method
+        private void SendAdminNotification(string title, string message, int color)
+        {
+            if (string.IsNullOrEmpty(adminDiscordWebhookUrl)) return;
+
+            var payload = new
+            {
+                embeds = new[]
+                {
+                    new
+                    {
+                        title = title,
+                        description = message,
+                        color = color,
+                        timestamp = DateTime.UtcNow.ToString("o")
+                    }
+                }
+            };
+
+            var headers = new Dictionary<string, string> { { "Content-Type", "application/json" } };
+            MakeWebRequest(adminDiscordWebhookUrl, JsonConvert.SerializeObject(payload), (code, response) => { }, RequestMethod.POST, headers);
+        }
+
         private void SendInvoiceToDiscord(IPlayer player, string invoice, int amountSats, string memo, PendingInvoice pendingInvoice)
         {
             if (string.IsNullOrEmpty(config.DiscordWebhookUrl)) return;
@@ -1410,7 +1417,8 @@ namespace Oxide.Plugins
             string qrCodeUrl = $"https://api.qrserver.com/v1/create-qr-code/?data={Uri.EscapeDataString(invoice)}&size=200x200";
             var payload = new
             {
-                content = $"**{player.Name}**, please pay **{amountSats} sats**.",
+                // NEW: Updated to ₿ symbol
+                content = $"**{player.Name}**, please pay **₿{amountSats}**.",
                 embeds = new[]
                 {
                     new
@@ -1418,21 +1426,20 @@ namespace Oxide.Plugins
                         title = "Payment Invoice",
                         description = $"{memo}\n\n```\n{invoice}\n```",
                         image = new { url = qrCodeUrl },
-                        fields = new[] { new { name = "Amount", value = $"{amountSats} sats", inline = true } }
+                        // NEW: Updated to ₿ symbol
+                        fields = new[] { new { name = "Amount", value = $"₿{amountSats}", inline = true } }
                     }
                 }
             };
 
             var headers = new Dictionary<string, string> { { "Content-Type", "application/json" } };
             
-            // ADDED: ?wait=true to the URL so Discord returns the message object
             string url = $"{config.DiscordWebhookUrl}?wait=true";
 
             MakeWebRequest(url, JsonConvert.SerializeObject(payload), (code, response) => 
             {
                 if (code >= 200 && code < 300 && !string.IsNullOrEmpty(response))
                 {
-                    // Parse the ID and store it in the pending invoice
                     try 
                     {
                         var discordResponse = JsonConvert.DeserializeObject<Dictionary<string, object>>(response);
@@ -1450,44 +1457,39 @@ namespace Oxide.Plugins
             }, RequestMethod.POST, headers);
         }
 
-        // NEW: Helper to delete discord messages
-        // NEW: Helper to EDIT discord message to show expiry status
         private void EditDiscordMessage(string messageId, IPlayer player, int amountSats)
         {
             if (string.IsNullOrEmpty(config.DiscordWebhookUrl) || string.IsNullOrEmpty(messageId)) return;
             
-            // Discord webhooks allow editing specific messages by appending /messages/{id}
             string editUrl = $"{config.DiscordWebhookUrl}/messages/{messageId}";
             
             var payload = new
             {
-                content = $"~~**{player.Name}**, please pay **{amountSats} sats**.~~",
+                // NEW: Updated to ₿ symbol
+                content = $"~~**{player.Name}**, please pay **₿{amountSats}**.~~",
                 embeds = new[]
                 {
                     new
                     {
                         title = "Invoice Expired",
                         description = "This invoice has expired due to timeout. Please request a new one.",
-                        color = 15158332, // Red color
+                        color = 15158332, 
                         fields = new[] { new { name = "Status", value = "EXPIRED", inline = true } }
                     }
                 }
             };
 
-            // PATCH is the HTTP method to Edit
             MakeWebRequest(editUrl, JsonConvert.SerializeObject(payload), (code, response) => 
             {
                 if (code >= 200 && code < 300) Puts($"Marked Discord message {messageId} as expired.");
             }, RequestMethod.PATCH, new Dictionary<string, string> { { "Content-Type", "application/json" } });
         }
 
-        // NEW: Helper to cancel LNbits payment (Stop attempting)
         private void CancelLNbitsPayment(string paymentHash)
         {
             string url = $"{config.BaseUrl}/api/v1/payments/{paymentHash}";
             var headers = new Dictionary<string, string> { { "X-Api-Key", config.ApiKey } };
 
-            // Sending a DELETE request to LNbits removes the check
             MakeWebRequest(url, null, (code, response) =>
             {
                 Puts($"Attempted to cancel/delete payment {paymentHash} in LNbits. Code: {code}");
@@ -1496,13 +1498,11 @@ namespace Oxide.Plugins
 
         private void ExpireInvoice(PendingInvoice pendingInvoice, string reason)
         {
-            // 1. Remove from list immediately
             if (pendingInvoices.Contains(pendingInvoice))
             {
                 pendingInvoices.Remove(pendingInvoice);
             }
 
-            // 2. Clean up WebSocket
             lock (webSocketLock)
             {
                 if (activeWebSockets.ContainsKey(pendingInvoice.RHash))
@@ -1512,30 +1512,23 @@ namespace Oxide.Plugins
                 }
             }
             
-            // 3. Clean up Retry Counts
             if (retryCounts.ContainsKey(pendingInvoice.RHash))
             {
                 retryCounts.Remove(pendingInvoice.RHash);
             }
 
-            // 4. Update Discord Message (EDIT instead of Delete)
             if (!string.IsNullOrEmpty(pendingInvoice.DiscordMessageId))
             {
-                EditDiscordMessage(pendingInvoice.DiscordMessageId, pendingInvoice.Player, pendingInvoice.Amount);
+                EditDiscordMessage(pendingInvoice.DiscordMessageId, pendingInvoice.Player, pendingInvoice.SatsAmount);
             }
 
-            // 5. Cancel LNbits Payment (for both Buy and Sell to be safe, but mostly for Sell)
-            // It doesn't hurt to try canceling an inbound invoice too.
             CancelLNbitsPayment(pendingInvoice.RHash);
 
-            // 6. Handle specific types (Refunds or Status Updates)
             if (pendingInvoice.Type == PurchaseType.SendBitcoin)
             {
                 var basePlayer = pendingInvoice.Player.Object as BasePlayer;
                 if (basePlayer != null) 
                 {
-                    // Removed Automatic Refunds - Dangerous when dealing with HTLC's that can't be cancelled.
-                    // ReturnCurrency(basePlayer, pendingInvoice.Amount / satsPerCurrencyUnit);
                     pendingInvoice.Player.Reply("Payment is delayed. If it takes more than a few hours please open a ticket in Discord.");
                     Puts($"[ALERT] Outbound payment stuck for {pendingInvoice.Player.Name}. Hash: {pendingInvoice.RHash}. Do NOT refund unless confirmed failed in LNbits.");
                 }
@@ -1549,6 +1542,5 @@ namespace Oxide.Plugins
             
             Puts($"Invoice {pendingInvoice.RHash} expired. Reason: {reason}");
         }
-
     }
 }
