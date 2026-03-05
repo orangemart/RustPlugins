@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "2.0.4")]
+    [Info("Team Skins", "Orangemart", "2.0.5")]
     [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
@@ -112,8 +112,6 @@ namespace Oxide.Plugins
             BuildManualCache();
         }
 
-       // --- Replace your existing OnServerInitialized with this ---
-        
         private Timer _initTimer;
 
         private void OnServerInitialized()
@@ -268,7 +266,7 @@ namespace Oxide.Plugins
             }
         }
 
-        // FIX 2: Visual Glitch - Clear ghosts if you drag the item out of Slot 0
+        // Fix: Visual Glitch - Clear ghosts if you drag the item out of Slot 0 safely
         private void OnItemRemovedFromContainer(ItemContainer container, Item item)
         {
             var ownerId = _openContainers.FirstOrDefault(x => x.Value == container).Key;
@@ -282,8 +280,7 @@ namespace Oxide.Plugins
                     var ghost = container.GetSlot(i);
                     if (ghost != null)
                     {
-                        ghost.RemoveFromContainer();
-                        ghost.Remove();
+                        SafeRemoveItem(ghost);
                     }
                 }
             }
@@ -303,11 +300,14 @@ namespace Oxide.Plugins
 
         private void DisplaySkins(BasePlayer player, ItemContainer container, Item targetItem)
         {
-            // Clear existing ghosts first
+            // Clear existing ghosts first safely
             for (int i = 1; i < container.capacity; i++)
             {
                 var ghost = container.GetSlot(i);
-                if (ghost != null) { ghost.RemoveFromContainer(); ghost.Remove(); }
+                if (ghost != null) 
+                { 
+                    SafeRemoveItem(ghost); 
+                }
             }
 
             var baseDef = GetBaseItemDef(targetItem.info);
@@ -329,6 +329,14 @@ namespace Oxide.Plugins
                 {
                     ghost.condition = targetItem.condition;
                     ghost.maxCondition = targetItem.maxCondition;
+                    
+                    // --- AMMO EXPLOIT FIX ---
+                    var projectile = ghost.GetHeldEntity() as BaseProjectile;
+                    if (projectile != null && projectile.primaryMagazine != null)
+                    {
+                        projectile.primaryMagazine.contents = 0;
+                    }
+                    
                     ghost.MoveToContainer(container, slot);
                     slot++;
                 }
@@ -336,64 +344,115 @@ namespace Oxide.Plugins
         }
 
         private object CanMoveItem(Item item, PlayerInventory playerLoot, ItemContainerId targetContainer, int targetSlot, int amount)
-{
-    var player = playerLoot.GetComponent<BasePlayer>();
-    if (player == null || !_openContainers.TryGetValue(player.userID, out var box)) return null;
-
-    // Interaction: Clicking/Dragging a Skin Ghost
-    if (item.parent == box && item.position > 0)
-    {
-        var originalItem = box.GetSlot(0);
-        if (originalItem != null)
         {
-            // Check if this is a "Redirect" (Item Definition Change)
-            bool isRedirect = item.info.shortname != originalItem.info.shortname;
+            var player = playerLoot.GetComponent<BasePlayer>();
+            if (player == null || !_openContainers.TryGetValue(player.userID, out var box)) return null;
 
-            if (isRedirect)
+            // Interaction: Clicking/Dragging a Skin Ghost
+            if (item.parent == box && item.position > 0)
             {
-                // SCENARIO A: Redirect (Must adopt the ghost item)
-                TransferItemProps(originalItem, item);
-                
-                if (!item.MoveToContainer(player.inventory.containerMain))
-                    item.MoveToContainer(player.inventory.containerBelt);
-                    
-                originalItem.RemoveFromContainer();
-                originalItem.Remove();
-            }
-            else
-            {
-                // SCENARIO B: Simple Skin (Modify the original)
-                originalItem.skin = item.skin;
-                originalItem.MarkDirty(); // Update icon
-                
-                // --- FIX START: Force Update Held Entity ---
-                var heldEntity = originalItem.GetHeldEntity();
-                if (heldEntity != null)
+                var originalItem = box.GetSlot(0);
+                if (originalItem != null)
                 {
-                    heldEntity.skinID = item.skin;
-                    heldEntity.SendNetworkUpdate();
-                }
-                // --- FIX END ---
+                    // Check if this is a "Redirect" (Item Definition Change)
+                    bool isRedirect = item.info.shortname != originalItem.info.shortname;
 
-                // Force Move ORIGINAL to player
-                if (!originalItem.MoveToContainer(player.inventory.containerMain))
-                    originalItem.MoveToContainer(player.inventory.containerBelt);
+                    if (isRedirect)
+                    {
+                        // SCENARIO A: Redirect (Must adopt the ghost item)
+                        TransferItemProps(originalItem, item);
+                        
+                        if (!item.MoveToContainer(player.inventory.containerMain))
+                            item.MoveToContainer(player.inventory.containerBelt);
+                            
+                        SafeRemoveItem(originalItem);
+                    }
+                    else
+                    {
+                        // SCENARIO B: Simple Skin (Modify the original)
+                        originalItem.skin = item.skin;
+                        originalItem.MarkDirty(); // Update icon
+                        
+                        // Force Update Held Entity
+                        var heldEntity = originalItem.GetHeldEntity();
+                        if (heldEntity != null)
+                        {
+                            heldEntity.skinID = item.skin;
+                            heldEntity.SendNetworkUpdate();
+                        }
+
+                        // Force Move ORIGINAL to player
+                        if (!originalItem.MoveToContainer(player.inventory.containerMain))
+                            originalItem.MoveToContainer(player.inventory.containerBelt);
+                    }
+
+                    player.ChatMessage($"Skin Applied! ({item.info.displayName.translated})");
+                    
+                    NextFrame(() => {
+                        if (player.IsConnected) player.EndLooting();
+                    });
+                    
+                    return false; 
+                }
             }
 
-            player.ChatMessage($"Skin Applied! ({item.info.displayName.translated})");
-            
-            NextFrame(() => {
-                if (player.IsConnected) player.EndLooting();
-            });
-            
-            return false; 
+            if (targetContainer == box.uid && targetSlot > 0) return false;
+
+            return null;
         }
-    }
 
-    if (targetContainer == box.uid && targetSlot > 0) return false;
+        // --- SPLITTING EXPLOIT FIX ---
+        private void OnItemSplit(Item item, int amount)
+        {
+            if (item?.parent == null) return;
 
-    return null;
-}
+            // Check if the split happened inside one of our skin containers
+            if (_openContainers.ContainsValue(item.parent))
+            {
+                var ownerId = _openContainers.FirstOrDefault(x => x.Value == item.parent).Key;
+                var player = BasePlayer.FindByID(ownerId);
+                
+                if (player != null)
+                {
+                    // Move the split offshoot directly back to the player's inventory
+                    NextFrame(() =>
+                    {
+                        if (item != null && item.IsValid())
+                        {
+                            player.GiveItem(item);
+                        }
+                    });
+                }
+            }
+        }
+
+        // --- SAFE REMOVE ITEM LOGIC ---
+        private void SafeRemoveItem(Item item)
+        {
+            if (item == null) return;
+
+            if (item.uid.IsValid && Net.sv != null)
+            {
+                Net.sv.ReturnUID(item.uid.Value);
+                item.uid = default(ItemId);
+            }
+
+            if (item.contents != null)
+            {
+                for (var i = item.contents.itemList.Count - 1; i >= 0; i--)
+                {
+                    SafeRemoveItem(item.contents.itemList[i]);
+                }
+                item.contents = null;
+            }
+
+            item.RemoveFromWorld();
+            item.parent = null;
+
+            var heldEntity = item.GetHeldEntity();
+            if (heldEntity != null && heldEntity.IsValid() && !heldEntity.IsDestroyed)
+                heldEntity.Kill();
+        }
 
         private void TransferItemProps(Item source, Item destination)
         {
