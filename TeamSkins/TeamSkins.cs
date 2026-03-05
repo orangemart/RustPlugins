@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "2.0.7")]
+    [Info("Team Skins", "Orangemart", "2.0.8")]
     [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
@@ -357,21 +357,18 @@ namespace Oxide.Plugins
                 {
                     bool isRedirect = item.info.shortname != originalItem.info.shortname;
 
-                    // Defer the inventory manipulation to the next frame to prevent RPC errors
                     NextFrame(() =>
                     {
                         if (originalItem == null || !originalItem.IsValid()) return;
 
                         if (isRedirect)
                         {
-                            // SCENARIO A: Redirect
                             TransferItemProps(originalItem, item);
                             player.GiveItem(item);
                             originalItem.Remove();
                         }
                         else
                         {
-                            // SCENARIO B: Simple Skin
                             originalItem.skin = item.skin;
                             originalItem.MarkDirty(); 
 
@@ -386,10 +383,15 @@ namespace Oxide.Plugins
                         }
 
                         player.ChatMessage($"Skin Applied! ({item.info.displayName.translated})");
+                        
+                        // FIX: Force the client to resync its inventory completely.
+                        // This wipes out the fake predicted ghost item that causes the RPC kick.
+                        player.inventory.SendSnapshot();
+                        
                         if (player.IsConnected) player.EndLooting();
                     });
 
-                    return false; // Safely block the client's native drag/drop attempt
+                    return false; 
                 }
             }
 
@@ -432,6 +434,7 @@ namespace Oxide.Plugins
 
         private void TransferItemProps(Item source, Item destination)
         {
+            destination.amount = source.amount;
             destination.condition = source.condition;
             destination.maxCondition = source.maxCondition;
             
