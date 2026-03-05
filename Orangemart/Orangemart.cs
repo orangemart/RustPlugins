@@ -13,8 +13,8 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Orangemart", "RustySats Orangemart", "0.5.2")]
-    [Description("Allows players to buy and sell in-game units and VIP status using Bitcoin Lightning Network payments via LNbits with WebSocket support and comprehensive protection features")]
+    [Info("Orangemart", "RustySats Orangemart", "0.6.0")]
+    [Description("Allows players to buy and sell in-game units and VIP status using Bitcoin Lightning Network payments via LNbits with Fiat/BTC pricing and comprehensive protection features")]
     public class Orangemart : CovalencePlugin
     {
         // Configuration sections and keys
@@ -39,6 +39,7 @@ namespace Oxide.Plugins
             public const string CurrencyName = "CurrencyName";
             public const string CurrencySkinID = "CurrencySkinID";
             public const string PricePerCurrencyUnit = "PricePerCurrencyUnit";
+            public const string CurrencyPriceCurrency = "CurrencyPriceCurrency"; // NEW
             public const string SatsPerCurrencyUnit = "SatsPerCurrencyUnit";
             
             // Protection Settings
@@ -50,7 +51,7 @@ namespace Oxide.Plugins
             // Discord
             public const string DiscordChannelName = "DiscordChannelName";
             public const string DiscordWebhookUrl = "DiscordWebhookUrl";
-            public const string AdminDiscordWebhookUrl = "AdminDiscordWebhookUrl"; // NEW: Admin Webhook
+            public const string AdminDiscordWebhookUrl = "AdminDiscordWebhookUrl";
 
             // InvoiceSettings
             public const string BlacklistedDomains = "BlacklistedDomains";
@@ -65,6 +66,7 @@ namespace Oxide.Plugins
 
             // VIPSettings
             public const string VipPrice = "VipPrice";
+            public const string VipPriceCurrency = "VipPriceCurrency"; // NEW
             public const string VipCommand = "VipCommand";
         }
 
@@ -73,13 +75,15 @@ namespace Oxide.Plugins
         private string buyCurrencyCommandName;
         private string sendCurrencyCommandName;
         private string buyVipCommandName;
-        private int vipPrice;
+        private double vipPrice; // Changed to double for USD decimals
+        private string vipPriceCurrency; // NEW
         private string vipCommand;
         private string currencyName;
         private int satsPerCurrencyUnit;
-        private int pricePerCurrencyUnit;
+        private double pricePerCurrencyUnit; // Changed to double for USD decimals
+        private string currencyPriceCurrency; // NEW
         private string discordChannelName;
-        private string adminDiscordWebhookUrl; // NEW
+        private string adminDiscordWebhookUrl;
         private ulong currencySkinID;
         private int checkIntervalSeconds;
         private int invoiceTimeoutSeconds;
@@ -106,6 +110,10 @@ namespace Oxide.Plugins
         private Dictionary<string, WebSocketConnection> activeWebSockets = new Dictionary<string, WebSocketConnection>();
         private readonly object webSocketLock = new object();
 
+        // BTC Price Cache
+        private double cachedBtcPriceUsd = 0;
+        private DateTime lastBtcPriceFetch = DateTime.MinValue;
+
         // Transaction status constants
         private static class TransactionStatus
         {
@@ -115,6 +123,13 @@ namespace Oxide.Plugins
             public const string FAILED = "FAILED";
             public const string EXPIRED = "EXPIRED";
             public const string REFUNDED = "REFUNDED";
+        }
+
+        // Price Fetching Models
+        private class MempoolPriceResponse
+        {
+            [JsonProperty("USD")]
+            public double USD { get; set; }
         }
 
         // WebSocket connection wrapper
@@ -171,7 +186,6 @@ namespace Oxide.Plugins
                 if (!Uri.IsWellFormedUriString(trimmedBaseUrl, UriKind.Absolute))
                     throw new Exception("Invalid base URL in connection string.");
 
-                // Convert HTTP URL to WebSocket URL
                 var wsUrl = trimmedBaseUrl.Replace("https://", "wss://").Replace("http://", "ws://");
 
                 return new LNbitsConfig
@@ -194,7 +208,6 @@ namespace Oxide.Plugins
             public string PaymentHash { get; set; }
         }
 
-        // Wrapper class for LNbits v1 responses
         private class InvoiceResponseWrapper
         {
             [JsonProperty("data")]
@@ -239,7 +252,7 @@ namespace Oxide.Plugins
             public string RHash { get; set; }
             public IPlayer Player { get; set; }
             public int Amount { get; set; }
-            public int SatsAmount { get; set; } // NEW: Helps accurately log the ₿ amount
+            public int SatsAmount { get; set; }
             public string Memo { get; set; }
             public DateTime CreatedAt { get; set; }
             public PurchaseType Type { get; set; }
@@ -269,46 +282,46 @@ namespace Oxide.Plugins
             {
                 bool configChanged = false;
 
-                // Parse LNbits connection settings
                 config = LNbitsConfig.ParseLNbitsConnection(
                     GetConfigValue(ConfigSections.InvoiceSettings, ConfigKeys.LNbitsBaseUrl, "https://your-lnbits-instance.com", ref configChanged),
                     GetConfigValue(ConfigSections.InvoiceSettings, ConfigKeys.LNbitsApiKey, "your-lnbits-admin-api-key", ref configChanged),
                     GetConfigValue(ConfigSections.Discord, ConfigKeys.DiscordWebhookUrl, "https://discord.com/api/webhooks/your_webhook_url", ref configChanged)
                 );
 
-                // Parse Currency Settings
+                // Currency Settings
                 currencyItemID = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.CurrencyItemID, 1776460938, ref configChanged);
                 currencyName = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.CurrencyName, "blood", ref configChanged);
                 satsPerCurrencyUnit = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.SatsPerCurrencyUnit, 1, ref configChanged);
-                pricePerCurrencyUnit = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.PricePerCurrencyUnit, 1, ref configChanged);
+                pricePerCurrencyUnit = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.PricePerCurrencyUnit, 1.0, ref configChanged);
+                currencyPriceCurrency = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.CurrencyPriceCurrency, "SATS", ref configChanged);
                 currencySkinID = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.CurrencySkinID, 0UL, ref configChanged);
 
-                // Parse Protection Settings
+                // Protection Settings
                 maxPurchaseAmount = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.MaxPurchaseAmount, 10000, ref configChanged);
                 maxSendAmount = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.MaxSendAmount, 10000, ref configChanged);
                 commandCooldownSeconds = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.CommandCooldownSeconds, 0, ref configChanged);
                 maxPendingInvoicesPerPlayer = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.MaxPendingInvoicesPerPlayer, 1, ref configChanged);
 
-                // Ensure non-negative values
                 if (maxPurchaseAmount < 0) maxPurchaseAmount = 0;
                 if (maxSendAmount < 0) maxSendAmount = 0;
                 if (commandCooldownSeconds < 0) commandCooldownSeconds = 0;
                 if (maxPendingInvoicesPerPlayer < 0) maxPendingInvoicesPerPlayer = 0;
 
-                // Parse Command Names
+                // Command Names
                 buyCurrencyCommandName = GetConfigValue(ConfigSections.Commands, ConfigKeys.BuyCurrencyCommandName, "buyblood", ref configChanged);
                 sendCurrencyCommandName = GetConfigValue(ConfigSections.Commands, ConfigKeys.SendCurrencyCommandName, "sendblood", ref configChanged);
                 buyVipCommandName = GetConfigValue(ConfigSections.Commands, ConfigKeys.BuyVipCommandName, "buyvip", ref configChanged);
 
-                // Parse VIP Settings
-                vipPrice = GetConfigValue(ConfigSections.VIPSettings, ConfigKeys.VipPrice, 1000, ref configChanged);
+                // VIP Settings
+                vipPrice = GetConfigValue(ConfigSections.VIPSettings, ConfigKeys.VipPrice, 1000.0, ref configChanged);
+                vipPriceCurrency = GetConfigValue(ConfigSections.VIPSettings, ConfigKeys.VipPriceCurrency, "SATS", ref configChanged);
                 vipCommand = GetConfigValue(ConfigSections.VIPSettings, ConfigKeys.VipCommand, "oxide.usergroup add {player} vip", ref configChanged);
 
-                // Parse Discord Settings
+                // Discord Settings
                 discordChannelName = GetConfigValue(ConfigSections.Discord, ConfigKeys.DiscordChannelName, "mart", ref configChanged);
-                adminDiscordWebhookUrl = GetConfigValue(ConfigSections.Discord, ConfigKeys.AdminDiscordWebhookUrl, "", ref configChanged); // NEW
+                adminDiscordWebhookUrl = GetConfigValue(ConfigSections.Discord, ConfigKeys.AdminDiscordWebhookUrl, "", ref configChanged);
 
-                // Parse Invoice Settings
+                // Invoice Settings
                 checkIntervalSeconds = GetConfigValue(ConfigSections.InvoiceSettings, ConfigKeys.CheckIntervalSeconds, 10, ref configChanged);
                 invoiceTimeoutSeconds = GetConfigValue(ConfigSections.InvoiceSettings, ConfigKeys.InvoiceTimeoutSeconds, 300, ref configChanged);
                 maxRetries = GetConfigValue(ConfigSections.InvoiceSettings, ConfigKeys.MaxRetries, 25, ref configChanged);
@@ -327,6 +340,7 @@ namespace Oxide.Plugins
                 }
 
                 Puts($"Protection Settings: MaxPurchase={maxPurchaseAmount}, MaxSend={maxSendAmount}, Cooldown={commandCooldownSeconds}s, MaxPending={maxPendingInvoicesPerPlayer}");
+                Puts($"Pricing Denominations: VIP={vipPriceCurrency}, Currency={currencyPriceCurrency}");
             }
             catch (Exception ex)
             {
@@ -359,10 +373,8 @@ namespace Oxide.Plugins
                         return (T)(object)enumerable.Select(item => item.ToString()).ToList();
                     return (T)(object)new List<string> { value.ToString() };
                 }
-                if (typeof(T) == typeof(ulong))
-                {
-                    return (T)(object)Convert.ToUInt64(value);
-                }
+                if (typeof(T) == typeof(ulong)) return (T)(object)Convert.ToUInt64(value);
+                if (typeof(T) == typeof(double)) return (T)(object)Convert.ToDouble(value);
                 return (T)Convert.ChangeType(value, typeof(T));
             }
             catch
@@ -387,7 +399,8 @@ namespace Oxide.Plugins
                 [ConfigKeys.CurrencyItemID] = 1776460938,
                 [ConfigKeys.CurrencyName] = "blood",
                 [ConfigKeys.CurrencySkinID] = 0UL,
-                [ConfigKeys.PricePerCurrencyUnit] = 1,
+                [ConfigKeys.PricePerCurrencyUnit] = 1.0,
+                [ConfigKeys.CurrencyPriceCurrency] = "SATS",
                 [ConfigKeys.SatsPerCurrencyUnit] = 1,
                 [ConfigKeys.MaxPurchaseAmount] = 10000,
                 [ConfigKeys.MaxSendAmount] = 10000,
@@ -399,7 +412,7 @@ namespace Oxide.Plugins
             {
                 [ConfigKeys.DiscordChannelName] = "mart",
                 [ConfigKeys.DiscordWebhookUrl] = "https://discord.com/api/webhooks/your_webhook_url",
-                [ConfigKeys.AdminDiscordWebhookUrl] = "" // NEW
+                [ConfigKeys.AdminDiscordWebhookUrl] = "" 
             };
 
             Config[ConfigSections.InvoiceSettings] = new Dictionary<string, object>
@@ -418,7 +431,8 @@ namespace Oxide.Plugins
             Config[ConfigSections.VIPSettings] = new Dictionary<string, object>
             {
                 [ConfigKeys.VipCommand] = "oxide.usergroup add {steamid} vip",
-                [ConfigKeys.VipPrice] = 1000
+                [ConfigKeys.VipPrice] = 1000.0,
+                [ConfigKeys.VipPriceCurrency] = "SATS"
             };
         }
 
@@ -455,6 +469,63 @@ namespace Oxide.Plugins
             pendingInvoices.Clear();
             retryCounts.Clear();
             lastCommandTime.Clear();
+        }
+
+        // --- Pricing Methods ---
+        private void GetBtcPriceUsd(Action<double> callback)
+        {
+            // Use cached price if it's less than 5 minutes old
+            if ((DateTime.UtcNow - lastBtcPriceFetch).TotalMinutes < 5 && cachedBtcPriceUsd > 0)
+            {
+                callback(cachedBtcPriceUsd);
+                return;
+            }
+
+            webrequest.Enqueue("https://mempool.space/api/v1/prices", null, (code, response) =>
+            {
+                if (code == 200 && !string.IsNullOrEmpty(response))
+                {
+                    try
+                    {
+                        var data = JsonConvert.DeserializeObject<MempoolPriceResponse>(response);
+                        if (data != null && data.USD > 0)
+                        {
+                            cachedBtcPriceUsd = data.USD;
+                            lastBtcPriceFetch = DateTime.UtcNow;
+                            callback(cachedBtcPriceUsd);
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        PrintError($"Failed to parse BTC price from mempool.space: {ex.Message}");
+                    }
+                }
+                
+                // Fallback to cache if request fails but we have old data
+                if (cachedBtcPriceUsd > 0) callback(cachedBtcPriceUsd);
+                else callback(0);
+
+            }, this, RequestMethod.GET);
+        }
+
+        private void CalculateSatsAmount(double fiatOrSatsPrice, string currencyType, Action<int> callback)
+        {
+            if (currencyType.Equals("USD", StringComparison.OrdinalIgnoreCase))
+            {
+                GetBtcPriceUsd(btcPrice => {
+                    if (btcPrice <= 0) {
+                        callback(-1); // Error state
+                        return;
+                    }
+                    int sats = (int)Math.Ceiling((fiatOrSatsPrice / btcPrice) * 100_000_000);
+                    callback(sats);
+                });
+            }
+            else // Assume SATS
+            {
+                callback((int)Math.Ceiling(fiatOrSatsPrice));
+            }
         }
 
         // Protection Methods
@@ -495,31 +566,6 @@ namespace Oxide.Plugins
             return false;
         }
 
-        private bool ValidatePurchaseAmount(IPlayer player, int amount, out int safeSats)
-        {
-            safeSats = 0;
-            if (amount <= 0)
-            {
-                player.Reply(Lang("InvalidAmount", player.Id));
-                return false;
-            }
-            if (maxPurchaseAmount > 0 && amount > maxPurchaseAmount)
-            {
-                player.Reply(Lang("AmountTooLarge", player.Id, amount, maxPurchaseAmount, currencyName));
-                return false;
-            }
-            
-            long amountSatsLong = (long)amount * pricePerCurrencyUnit;
-            if (amountSatsLong > int.MaxValue)
-            {
-                player.Reply(Lang("AmountCausesOverflow", player.Id));
-                return false;
-            }
-            
-            safeSats = (int)amountSatsLong;
-            return true;
-        }
-
         private bool ValidateSendAmount(IPlayer player, int amount, out int safeSats)
         {
             safeSats = 0;
@@ -542,18 +588,6 @@ namespace Oxide.Plugins
             }
             
             safeSats = (int)amountSatsLong;
-            return true;
-        }
-
-        private bool ValidateVipPrice(IPlayer player, out int safeSats)
-        {
-            safeSats = 0;
-            if (vipPrice > int.MaxValue)
-            {
-                player.Reply(Lang("VipPriceTooHigh", player.Id));
-                return false;
-            }
-            safeSats = vipPrice;
             return true;
         }
 
@@ -618,7 +652,8 @@ namespace Oxide.Plugins
                 ["CommandOnCooldown"] = "Command '{0}' is on cooldown. Wait {1}s.",
                 ["TooManyPendingInvoices"] = "You have {0} pending invoices (max: {1}).",
                 ["VipPriceTooHigh"] = "VIP price is configured too high.",
-                ["ProtectionLimits"] = "Orangemart Limits: Purchase max {0}, Send max {1}, Cooldown {2}s"
+                ["ProtectionLimits"] = "Orangemart Limits: Purchase max {0}, Send max {1}, Cooldown {2}s",
+                ["FailedToFetchPrice"] = "Failed to fetch live exchange rate. Please try again."
             }, this);
         }
 
@@ -723,7 +758,6 @@ namespace Oxide.Plugins
             {
                 bool confirmed = false;
 
-                // Try Simple Format
                 try
                 {
                     var simpleUpdate = JsonConvert.DeserializeObject<Dictionary<string, object>>(message);
@@ -736,7 +770,6 @@ namespace Oxide.Plugins
                 }
                 catch { }
                 
-                // Try Complex Format
                 if (!confirmed)
                 {
                     try
@@ -772,10 +805,9 @@ namespace Oxide.Plugins
 
             pendingInvoices.Remove(invoice);
             
-            // NEW: Improved logging info with Player Name and Amount
             string logMsg = $"Processing payment confirmation for {invoice.Player.Name} (Amount: ₿{invoice.SatsAmount}). Hash: {invoice.RHash}, Type: {invoice.Type}";
             Puts($"[ProcessPayment] {logMsg}");
-            SendAdminNotification("Payment Confirmed", logMsg, 3066993); // Green color
+            SendAdminNotification("Payment Confirmed", logMsg, 3066993); 
 
             switch (invoice.Type)
             {
@@ -840,60 +872,77 @@ namespace Oxide.Plugins
             }
         }
 
-        // Protected CmdBuyCurrency method
         private void CmdBuyCurrency(IPlayer player, string command, string[] args)
         {
             if (!player.HasPermission("orangemart.buycurrency")) { player.Reply(Lang("NoPermission", player.Id)); return; }
             if (IsOnCooldown(player, "buy")) return;
             if (HasTooManyPendingInvoices(player)) return;
 
-            if (args.Length != 1 || !int.TryParse(args[0], out int amount))
+            if (args.Length != 1 || !int.TryParse(args[0], out int amount) || amount <= 0)
             {
                 player.Reply(Lang("InvalidCommandUsage", player.Id, buyCurrencyCommandName));
                 return;
             }
 
-            if (!ValidatePurchaseAmount(player, amount, out int amountSats)) return;
-
-            string transactionId = GenerateTransactionId();
-            LogBuyInvoice(CreateBuyInvoiceLogEntry(player, null, false, amountSats, PurchaseType.Currency, 0));
-
-            // NEW: Adding Player Name to the LNbits Memo
-            string memo = $"[Orangemart] {player.Name} buying {amount} {currencyName}";
-            CreateInvoice(amountSats, memo, invoiceResponse =>
+            if (maxPurchaseAmount > 0 && amount > maxPurchaseAmount)
             {
-                if (invoiceResponse != null)
-                {
-                    UpdateBuyTransactionInvoiceId(transactionId, invoiceResponse.PaymentHash);
-                    player.Reply(Lang("InvoiceCreatedCheckDiscord", player.Id, discordChannelName));
+                player.Reply(Lang("AmountTooLarge", player.Id, amount, maxPurchaseAmount, currencyName));
+                return;
+            }
 
-                    var pendingInvoice = new PendingInvoice
+            player.Reply(Lang("PaymentProcessing", player.Id));
+
+            // Calculate total cost before converting
+            double totalCost = amount * pricePerCurrencyUnit;
+
+            CalculateSatsAmount(totalCost, currencyPriceCurrency, amountSats => 
+            {
+                if (amountSats <= 0)
+                {
+                    player.Reply(Lang("FailedToFetchPrice", player.Id));
+                    return;
+                }
+
+                string transactionId = GenerateTransactionId();
+                LogBuyInvoice(CreateBuyInvoiceLogEntry(player, null, false, amountSats, PurchaseType.Currency, 0));
+
+                string memo = $"[Orangemart] {player.Name} buying {amount} {currencyName} " + 
+                              (currencyPriceCurrency == "USD" ? $"(${totalCost:F2})" : "");
+
+                CreateInvoice(amountSats, memo, invoiceResponse =>
+                {
+                    if (invoiceResponse != null)
                     {
-                        TransactionId = transactionId,
-                        RHash = invoiceResponse.PaymentHash.ToLower(),
-                        Player = player,
-                        Amount = amount,
-                        SatsAmount = amountSats,
-                        Memo = memo,
-                        CreatedAt = DateTime.UtcNow,
-                        Type = PurchaseType.Currency
-                    };
-                    pendingInvoices.Add(pendingInvoice);
-                    
-                    SendInvoiceToDiscord(player, invoiceResponse.PaymentRequest, amountSats, memo, pendingInvoice);
+                        UpdateBuyTransactionInvoiceId(transactionId, invoiceResponse.PaymentHash);
+                        player.Reply(Lang("InvoiceCreatedCheckDiscord", player.Id, discordChannelName));
 
-                    Task.Run(async () => await ConnectWebSocket(pendingInvoice));
-                    ScheduleInvoiceExpiry(pendingInvoice);
-                }
-                else
-                {
-                    player.Reply(Lang("FailedToCreateInvoice", player.Id));
-                    UpdateBuyTransactionStatus(transactionId, TransactionStatus.FAILED, false);
-                }
+                        var pendingInvoice = new PendingInvoice
+                        {
+                            TransactionId = transactionId,
+                            RHash = invoiceResponse.PaymentHash.ToLower(),
+                            Player = player,
+                            Amount = amount,
+                            SatsAmount = amountSats,
+                            Memo = memo,
+                            CreatedAt = DateTime.UtcNow,
+                            Type = PurchaseType.Currency
+                        };
+                        pendingInvoices.Add(pendingInvoice);
+                        
+                        SendInvoiceToDiscord(player, invoiceResponse.PaymentRequest, amountSats, memo, pendingInvoice);
+
+                        Task.Run(async () => await ConnectWebSocket(pendingInvoice));
+                        ScheduleInvoiceExpiry(pendingInvoice);
+                    }
+                    else
+                    {
+                        player.Reply(Lang("FailedToCreateInvoice", player.Id));
+                        UpdateBuyTransactionStatus(transactionId, TransactionStatus.FAILED, false);
+                    }
+                });
             });
         }
 
-        // Protected CmdSendCurrency method
         private void CmdSendCurrency(IPlayer player, string command, string[] args)
         {
             if (!player.HasPermission("orangemart.sendcurrency")) { player.Reply(Lang("NoPermission", player.Id)); return; }
@@ -958,10 +1007,9 @@ namespace Oxide.Plugins
                     
                     pendingInvoices.Add(pendingInvoice);
                     
-                    // NEW: Better Logging & Admin Discord Notification for Outbound Sends
                     string logMsg = $"Outbound payment to {lightningAddress} initiated by {player.Name} for ₿{satsAmount}. PaymentHash: {paymentHash}";
                     Puts(logMsg);
-                    SendAdminNotification("Outbound Payment Initiated", logMsg, 16753920); // Orange color
+                    SendAdminNotification("Outbound Payment Initiated", logMsg, 16753920);
 
                     CheckInvoicePaid(paymentHash, isPaid => 
                     {
@@ -976,56 +1024,70 @@ namespace Oxide.Plugins
                     player.Reply(Lang("FailedToProcessPayment", player.Id));
                     UpdateSellTransactionStatus(transactionId, TransactionStatus.FAILED, false, "Failed to initiate payment", true);
                     
-                    // Refund
                     ReturnCurrency(basePlayer, amount);
                 }
             });
         }
 
-        // Protected CmdBuyVip method
         private void CmdBuyVip(IPlayer player, string command, string[] args)
         {
             if (!player.HasPermission("orangemart.buyvip")) { player.Reply(Lang("NoPermission", player.Id)); return; }
             if (IsOnCooldown(player, "vip")) return;
             if (HasTooManyPendingInvoices(player)) return;
 
-            if (!ValidateVipPrice(player, out int amountSats)) return;
+            player.Reply(Lang("PaymentProcessing", player.Id));
 
-            string transactionId = GenerateTransactionId();
-            LogBuyInvoice(CreateBuyInvoiceLogEntry(player, null, false, amountSats, PurchaseType.Vip, 0));
-
-            // NEW: Adding Player Name to the LNbits Memo
-            string memo = $"[Orangemart] {player.Name} buying VIP Status";
-            CreateInvoice(amountSats, memo, invoiceResponse =>
+            CalculateSatsAmount(vipPrice, vipPriceCurrency, amountSats => 
             {
-                if (invoiceResponse != null)
+                if (amountSats <= 0)
                 {
-                    UpdateBuyTransactionInvoiceId(transactionId, invoiceResponse.PaymentHash);
-                    player.Reply(Lang("InvoiceCreatedCheckDiscord", player.Id, discordChannelName));
+                    player.Reply(Lang("FailedToFetchPrice", player.Id));
+                    return;
+                }
+                
+                if (amountSats > int.MaxValue)
+                {
+                    player.Reply(Lang("VipPriceTooHigh", player.Id));
+                    return;
+                }
 
-                    var pendingInvoice = new PendingInvoice
+                string transactionId = GenerateTransactionId();
+                LogBuyInvoice(CreateBuyInvoiceLogEntry(player, null, false, amountSats, PurchaseType.Vip, 0));
+
+                string memo = $"[Orangemart] {player.Name} buying VIP Status " + 
+                              (vipPriceCurrency == "USD" ? $"(${vipPrice:F2})" : "");
+
+                CreateInvoice(amountSats, memo, invoiceResponse =>
+                {
+                    if (invoiceResponse != null)
                     {
-                        TransactionId = transactionId,
-                        RHash = invoiceResponse.PaymentHash.ToLower(),
-                        Player = player,
-                        Amount = amountSats,
-                        SatsAmount = amountSats,
-                        Memo = memo,
-                        CreatedAt = DateTime.UtcNow,
-                        Type = PurchaseType.Vip
-                    };
-                    pendingInvoices.Add(pendingInvoice);
+                        UpdateBuyTransactionInvoiceId(transactionId, invoiceResponse.PaymentHash);
+                        player.Reply(Lang("InvoiceCreatedCheckDiscord", player.Id, discordChannelName));
 
-                    SendInvoiceToDiscord(player, invoiceResponse.PaymentRequest, amountSats, memo, pendingInvoice);
-                    
-                    Task.Run(async () => await ConnectWebSocket(pendingInvoice));
-                    ScheduleInvoiceExpiry(pendingInvoice);
-                }
-                else
-                {
-                    player.Reply(Lang("FailedToCreateInvoice", player.Id));
-                    UpdateBuyTransactionStatus(transactionId, TransactionStatus.FAILED, false);
-                }
+                        var pendingInvoice = new PendingInvoice
+                        {
+                            TransactionId = transactionId,
+                            RHash = invoiceResponse.PaymentHash.ToLower(),
+                            Player = player,
+                            Amount = amountSats,
+                            SatsAmount = amountSats,
+                            Memo = memo,
+                            CreatedAt = DateTime.UtcNow,
+                            Type = PurchaseType.Vip
+                        };
+                        pendingInvoices.Add(pendingInvoice);
+
+                        SendInvoiceToDiscord(player, invoiceResponse.PaymentRequest, amountSats, memo, pendingInvoice);
+                        
+                        Task.Run(async () => await ConnectWebSocket(pendingInvoice));
+                        ScheduleInvoiceExpiry(pendingInvoice);
+                    }
+                    else
+                    {
+                        player.Reply(Lang("FailedToCreateInvoice", player.Id));
+                        UpdateBuyTransactionStatus(transactionId, TransactionStatus.FAILED, false);
+                    }
+                });
             });
         }
 
@@ -1387,7 +1449,6 @@ namespace Oxide.Plugins
             };
         }
 
-        // NEW: Admin helper notification method
         private void SendAdminNotification(string title, string message, int color)
         {
             if (string.IsNullOrEmpty(adminDiscordWebhookUrl)) return;
@@ -1417,7 +1478,6 @@ namespace Oxide.Plugins
             string qrCodeUrl = $"https://api.qrserver.com/v1/create-qr-code/?data={Uri.EscapeDataString(invoice)}&size=200x200";
             var payload = new
             {
-                // NEW: Updated to ₿ symbol
                 content = $"**{player.Name}**, please pay **₿{amountSats}**.",
                 embeds = new[]
                 {
@@ -1426,7 +1486,6 @@ namespace Oxide.Plugins
                         title = "Payment Invoice",
                         description = $"{memo}\n\n```\n{invoice}\n```",
                         image = new { url = qrCodeUrl },
-                        // NEW: Updated to ₿ symbol
                         fields = new[] { new { name = "Amount", value = $"₿{amountSats}", inline = true } }
                     }
                 }
@@ -1465,7 +1524,6 @@ namespace Oxide.Plugins
             
             var payload = new
             {
-                // NEW: Updated to ₿ symbol
                 content = $"~~**{player.Name}**, please pay **₿{amountSats}**.~~",
                 embeds = new[]
                 {
