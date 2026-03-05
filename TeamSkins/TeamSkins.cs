@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using Facepunch;
+using Network;
 using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Plugins;
@@ -9,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "2.0.5")]
+    [Info("Team Skins", "Orangemart", "2.0.6")]
     [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
