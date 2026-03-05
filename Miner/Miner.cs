@@ -7,7 +7,7 @@ using Facepunch; // Pool
 
 namespace Oxide.Plugins
 {
-    [Info("Miner", "Orangemart", "1.8.0")]
+    [Info("Miner", "Orangemart", "1.8.1")]
     [Description("Custom-skinned fridges generate scrap while sufficiently powered. /miner.craft with cost, per-player limits, VIP limits, and wipe command. Lang-based messages.")]
     public class Miner : RustPlugin
     {
@@ -309,7 +309,7 @@ namespace Oxide.Plugins
             }
 
             // Validate cost & inventory
-            var shortfalls = Pool.GetList<string>();
+            var shortfalls = Pool.Get<List<string>>();
             foreach (var kvp in _config.CraftCost)
             {
                 var shortname = kvp.Key;
@@ -333,10 +333,10 @@ namespace Oxide.Plugins
             if (shortfalls.Count > 0)
             {
                 player.ChatMessage(L("Craft.NotEnoughHeader", player) + "\n" + string.Join("\n", shortfalls.ToArray()));
-                Pool.FreeList(ref shortfalls);
+                Pool.FreeUnmanaged(ref shortfalls);
                 return;
             }
-            Pool.FreeList(ref shortfalls);
+            Pool.FreeUnmanaged(ref shortfalls);
 
             // Take cost
             foreach (var kvp in _config.CraftCost)
@@ -463,7 +463,7 @@ namespace Oxide.Plugins
         {
             if (_tracked.Count == 0) return;
 
-            var toRemove = Pool.GetList<BaseEntity>();
+            var toRemove = Pool.Get<List<BaseEntity>>();
 
             foreach (var be in _tracked)
             {
@@ -488,7 +488,7 @@ namespace Oxide.Plugins
             }
 
             foreach (var dead in toRemove) _tracked.Remove(dead);
-            Pool.FreeList(ref toRemove);
+            Pool.FreeUnmanaged(ref toRemove);
         }
 
         // Version-tolerant power read (usually post-consumption passthrough)
