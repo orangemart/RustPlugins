@@ -13,7 +13,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Orangemart", "RustySats Orangemart", "0.6.1")]
+    [Info("Orangemart", "RustySats Orangemart", "0.6.2")]
     [Description("Allows players to buy and sell in-game units and VIP status using Bitcoin Lightning Network payments via LNbits with Fiat/BTC pricing and comprehensive protection features")]
     public class Orangemart : CovalencePlugin
     {
@@ -39,7 +39,7 @@ namespace Oxide.Plugins
             public const string CurrencyName = "CurrencyName";
             public const string CurrencySkinID = "CurrencySkinID";
             public const string PricePerCurrencyUnit = "PricePerCurrencyUnit";
-            public const string CurrencyPriceCurrency = "CurrencyPriceCurrency"; // NEW
+            public const string CurrencyPriceCurrency = "CurrencyPriceCurrency"; 
             public const string SatsPerCurrencyUnit = "SatsPerCurrencyUnit";
             
             // Protection Settings
@@ -66,7 +66,7 @@ namespace Oxide.Plugins
 
             // VIPSettings
             public const string VipPrice = "VipPrice";
-            public const string VipPriceCurrency = "VipPriceCurrency"; // NEW
+            public const string VipPriceCurrency = "VipPriceCurrency"; 
             public const string VipCommand = "VipCommand";
         }
 
@@ -75,13 +75,13 @@ namespace Oxide.Plugins
         private string buyCurrencyCommandName;
         private string sendCurrencyCommandName;
         private string buyVipCommandName;
-        private double vipPrice; // Changed to double for USD decimals
-        private string vipPriceCurrency; // NEW
+        private double vipPrice; 
+        private string vipPriceCurrency; 
         private string vipCommand;
         private string currencyName;
         private int satsPerCurrencyUnit;
-        private double pricePerCurrencyUnit; // Changed to double for USD decimals
-        private string currencyPriceCurrency; // NEW
+        private double pricePerCurrencyUnit; 
+        private string currencyPriceCurrency; 
         private string discordChannelName;
         private string adminDiscordWebhookUrl;
         private ulong currencySkinID;
@@ -102,9 +102,12 @@ namespace Oxide.Plugins
 
         private const string SellLogFile = "Orangemart/send_bitcoin.json";
         private const string BuyInvoiceLogFile = "Orangemart/buy_invoices.json";
+        private const string OfflineQueueFile = "Orangemart/offline_rewards.json"; // NEW
+        
         private LNbitsConfig config;
         private List<PendingInvoice> pendingInvoices = new List<PendingInvoice>();
         private Dictionary<string, int> retryCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, int> offlineCurrencyQueue = new Dictionary<string, int>(); // NEW
         
         // WebSocket tracking
         private Dictionary<string, WebSocketConnection> activeWebSockets = new Dictionary<string, WebSocketConnection>();
@@ -451,6 +454,8 @@ namespace Oxide.Plugins
                 return;
             }
 
+            LoadOfflineQueue(); // Load pending items on startup
+
             AddCovalenceCommand(buyCurrencyCommandName, nameof(CmdBuyCurrency), "orangemart.buycurrency");
             AddCovalenceCommand(sendCurrencyCommandName, nameof(CmdSendCurrency), "orangemart.sendcurrency");
             AddCovalenceCommand(buyVipCommandName, nameof(CmdBuyVip), "orangemart.buyvip");
@@ -466,15 +471,64 @@ namespace Oxide.Plugins
         private void Unload()
         {
             CleanupAllWebSockets();
+            SaveOfflineQueue(); // Save pending items on shutdown/reload
             pendingInvoices.Clear();
             retryCounts.Clear();
             lastCommandTime.Clear();
         }
 
+        // --- Offline Queue Methods ---
+        private void LoadOfflineQueue()
+        {
+            var path = Path.Combine(Interface.Oxide.DataDirectory, OfflineQueueFile);
+            if (File.Exists(path))
+            {
+                offlineCurrencyQueue = JsonConvert.DeserializeObject<Dictionary<string, int>>(File.ReadAllText(path)) ?? new Dictionary<string, int>();
+            }
+        }
+
+        private void SaveOfflineQueue()
+        {
+            var path = Path.Combine(Interface.Oxide.DataDirectory, OfflineQueueFile);
+            if (!Directory.Exists(Path.GetDirectoryName(path))) Directory.CreateDirectory(Path.GetDirectoryName(path));
+            File.WriteAllText(path, JsonConvert.SerializeObject(offlineCurrencyQueue, Formatting.Indented));
+        }
+
+        private void AddOfflineCurrency(string playerId, int amount)
+        {
+            if (offlineCurrencyQueue.ContainsKey(playerId))
+                offlineCurrencyQueue[playerId] += amount;
+            else
+                offlineCurrencyQueue[playerId] = amount;
+                
+            SaveOfflineQueue();
+        }
+
+        private void OnPlayerSleepEnded(BasePlayer player)
+        {
+            if (player == null || !offlineCurrencyQueue.ContainsKey(player.UserIDString)) return;
+
+            int pendingAmount = offlineCurrencyQueue[player.UserIDString];
+            if (pendingAmount > 0)
+            {
+                var currencyItem = ItemManager.CreateByItemID(currencyItemID, pendingAmount);
+                if (currencyItem != null)
+                {
+                    if (currencySkinID > 0) currencyItem.skin = currencySkinID;
+                    player.GiveItem(currencyItem);
+                    
+                    player.ChatMessage($"Welcome back! You received {pendingAmount} {currencyName} from pending Orangemart transactions.");
+                    Puts($"Delivered {pendingAmount} offline {currencyName} to {player.displayName} ({player.UserIDString}).");
+                }
+            }
+            
+            offlineCurrencyQueue.Remove(player.UserIDString);
+            SaveOfflineQueue();
+        }
+
         // --- Pricing Methods ---
         private void GetBtcPriceUsd(Action<double> callback)
         {
-            // Use cached price if it's less than 5 minutes old
             if ((DateTime.UtcNow - lastBtcPriceFetch).TotalMinutes < 5 && cachedBtcPriceUsd > 0)
             {
                 callback(cachedBtcPriceUsd);
@@ -502,7 +556,6 @@ namespace Oxide.Plugins
                     }
                 }
                 
-                // Fallback to cache if request fails but we have old data
                 if (cachedBtcPriceUsd > 0) callback(cachedBtcPriceUsd);
                 else callback(0);
 
@@ -515,14 +568,14 @@ namespace Oxide.Plugins
             {
                 GetBtcPriceUsd(btcPrice => {
                     if (btcPrice <= 0) {
-                        callback(-1); // Error state
+                        callback(-1); 
                         return;
                     }
                     int sats = (int)Math.Ceiling((fiatOrSatsPrice / btcPrice) * 100_000_000);
                     callback(sats);
                 });
             }
-            else // Assume SATS
+            else 
             {
                 callback((int)Math.Ceiling(fiatOrSatsPrice));
             }
@@ -1021,7 +1074,6 @@ namespace Oxide.Plugins
                 }
                 else
                 {
-                    // Provide the exact reason to the player and server console
                     string replyMsg = errorMessage ?? Lang("FailedToProcessPayment", player.Id);
                     player.Reply(replyMsg);
                     
@@ -1029,7 +1081,8 @@ namespace Oxide.Plugins
 
                     UpdateSellTransactionStatus(transactionId, TransactionStatus.FAILED, false, replyMsg, true);
                     
-                    ReturnCurrency(basePlayer, amount);
+                    // Offline safe refund
+                    ReturnCurrency(GetPlayerId(player), amount);
                 }
             });
         }
@@ -1335,7 +1388,12 @@ namespace Oxide.Plugins
         private void RewardPlayer(IPlayer player, int amount)
         {
             var basePlayer = player.Object as BasePlayer;
-            if (basePlayer == null) return;
+            if (basePlayer == null || !basePlayer.IsConnected)
+            {
+                AddOfflineCurrency(GetPlayerId(player), amount);
+                Puts($"Player {player.Name} is offline. Saved {amount} {currencyName} to offline queue.");
+                return;
+            }
 
             var currencyItem = ItemManager.CreateByItemID(currencyItemID, amount);
             if (currencyItem != null)
@@ -1364,20 +1422,28 @@ namespace Oxide.Plugins
             server.Command(cmd);
         }
 
-        private void ReturnCurrency(BasePlayer player, int amount)
+        private void ReturnCurrency(string playerId, int amount)
         {
+            var basePlayer = BasePlayer.FindByID(Convert.ToUInt64(playerId));
+            if (basePlayer == null || !basePlayer.IsConnected)
+            {
+                AddOfflineCurrency(playerId, amount);
+                Puts($"Player {playerId} is offline. Saved {amount} {currencyName} to offline refund queue.");
+                return;
+            }
+
             var returnedCurrency = ItemManager.CreateByItemID(currencyItemID, amount);
             if (returnedCurrency != null)
             {
                 if (currencySkinID > 0) returnedCurrency.skin = currencySkinID;
                 
-                player.GiveItem(returnedCurrency);
+                basePlayer.GiveItem(returnedCurrency);
                 
                 if (returnedCurrency.parent == null)
                 {
-                    returnedCurrency.Drop(player.transform.position + new UnityEngine.Vector3(0f, 1.5f, 0f), UnityEngine.Vector3.zero);
+                    returnedCurrency.Drop(basePlayer.transform.position + new UnityEngine.Vector3(0f, 1.5f, 0f), UnityEngine.Vector3.zero);
                 }
-                Puts($"Returned {amount} {currencyName} to player {player.UserIDString}.");
+                Puts($"Returned {amount} {currencyName} to player {basePlayer.UserIDString}.");
             }
         }
 
