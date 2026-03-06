@@ -13,7 +13,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Orangemart", "RustySats Orangemart", "0.6.0")]
+    [Info("Orangemart", "RustySats Orangemart", "0.6.1")]
     [Description("Allows players to buy and sell in-game units and VIP status using Bitcoin Lightning Network payments via LNbits with Fiat/BTC pricing and comprehensive protection features")]
     public class Orangemart : CovalencePlugin
     {
@@ -987,7 +987,7 @@ namespace Oxide.Plugins
 
             player.Reply(Lang("TransactionInitiated", player.Id));
 
-            SendBitcoin(lightningAddress, satsAmount, (success, paymentHash) =>
+            SendBitcoin(lightningAddress, satsAmount, (success, paymentHash, errorMessage) =>
             {
                 if (success && !string.IsNullOrEmpty(paymentHash))
                 {
@@ -1021,8 +1021,13 @@ namespace Oxide.Plugins
                 }
                 else
                 {
-                    player.Reply(Lang("FailedToProcessPayment", player.Id));
-                    UpdateSellTransactionStatus(transactionId, TransactionStatus.FAILED, false, "Failed to initiate payment", true);
+                    // Provide the exact reason to the player and server console
+                    string replyMsg = errorMessage ?? Lang("FailedToProcessPayment", player.Id);
+                    player.Reply(replyMsg);
+                    
+                    Puts($"[Orangemart] Send failed for {player.Name} ({lightningAddress}). Reason: {replyMsg}");
+
+                    UpdateSellTransactionStatus(transactionId, TransactionStatus.FAILED, false, replyMsg, true);
                     
                     ReturnCurrency(basePlayer, amount);
                 }
@@ -1175,15 +1180,22 @@ namespace Oxide.Plugins
             return parts.Length == 2 ? parts[1].ToLower() : null;
         }
 
-        private void SendBitcoin(string lightningAddress, int satsAmount, Action<bool, string> callback)
+        private void SendBitcoin(string lightningAddress, int satsAmount, Action<bool, string, string> callback)
         {
-            ResolveLightningAddress(lightningAddress, satsAmount, bolt11 =>
+            ResolveLightningAddress(lightningAddress, satsAmount, (bolt11, errorMessage) =>
             {
-                if (string.IsNullOrEmpty(bolt11)) { callback(false, null); return; }
+                if (string.IsNullOrEmpty(bolt11)) { 
+                    callback(false, null, errorMessage ?? "Failed to resolve Lightning Address."); 
+                    return; 
+                }
 
                 SendPayment(bolt11, satsAmount, (success, paymentHash) =>
                 {
-                    callback(success, paymentHash);
+                    if (!success) {
+                        callback(false, null, "Failed to route payment via LNbits.");
+                    } else {
+                        callback(true, paymentHash, null);
+                    }
                 });
             });
         }
@@ -1249,36 +1261,64 @@ namespace Oxide.Plugins
             webrequest.Enqueue(url, jsonData, (code, response) => callback(code, response), this, method, headers);
         }
 
-        private void ResolveLightningAddress(string lightningAddress, int amountSats, Action<string> callback)
+        private void ResolveLightningAddress(string lightningAddress, int amountSats, Action<string, string> callback)
         {
             var parts = lightningAddress.Split('@');
-            if (parts.Length != 2) { callback(null); return; }
+            if (parts.Length != 2) { callback(null, "Invalid Lightning Address format."); return; }
 
-            string lnurlEndpoint = $"https://{parts[1]}/.well-known/lnurlp/{parts[0]}";
+            string domain = parts[1];
+            string username = parts[0];
+            string lnurlEndpoint = $"https://{domain}/.well-known/lnurlp/{username}";
 
             MakeWebRequest(lnurlEndpoint, null, (code, response) =>
             {
-                if (code != 200 || string.IsNullOrEmpty(response)) { callback(null); return; }
+                if (code == 404) {
+                    callback(null, $"User '{username}' not found at {domain}.");
+                    return;
+                }
+                if (code >= 500 && code <= 599) {
+                    callback(null, $"The receiving server ({domain}) is currently down or returned an error (HTTP {code}).");
+                    return;
+                }
+                if (code == 0) { 
+                    callback(null, $"Could not connect to {domain}. The domain might be offline.");
+                    return;
+                }
+                if (code != 200 || string.IsNullOrEmpty(response)) { 
+                    callback(null, $"Unexpected response from {domain} (HTTP {code})."); 
+                    return; 
+                }
+
                 try
                 {
                     var lnurlResponse = JsonConvert.DeserializeObject<LNURLResponse>(response);
-                    if (lnurlResponse == null || string.IsNullOrEmpty(lnurlResponse.Callback)) { callback(null); return; }
+                    if (lnurlResponse == null || string.IsNullOrEmpty(lnurlResponse.Callback)) { 
+                        callback(null, $"The server {domain} returned an invalid response."); 
+                        return; 
+                    }
 
                     long amountMsat = (long)amountSats * 1000;
                     string callbackUrl = $"{lnurlResponse.Callback}?amount={amountMsat}";
 
                     MakeWebRequest(callbackUrl, null, (payCode, payResponse) =>
                     {
-                        if (payCode != 200 || string.IsNullOrEmpty(payResponse)) { callback(null); return; }
+                        if (payCode != 200 || string.IsNullOrEmpty(payResponse)) { 
+                            callback(null, $"Failed to fetch invoice from {domain} (HTTP {payCode})."); 
+                            return; 
+                        }
                         try
                         {
                             var payAction = JsonConvert.DeserializeObject<LNURLPayResponse>(payResponse);
-                            callback(payAction?.Pr);
+                            if (string.IsNullOrEmpty(payAction?.Pr)) {
+                                callback(null, $"The server {domain} did not provide a valid invoice.");
+                                return;
+                            }
+                            callback(payAction.Pr, null);
                         }
-                        catch { callback(null); }
+                        catch { callback(null, $"Error parsing invoice data from {domain}."); }
                     });
                 }
-                catch { callback(null); }
+                catch { callback(null, $"Error parsing data from {domain}."); }
             });
         }
 
