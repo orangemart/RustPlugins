@@ -13,7 +13,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Orangemart", "RustySats Orangemart", "0.6.2")]
+    [Info("Orangemart", "RustySats Orangemart", "0.7.0")]
     [Description("Allows players to buy and sell in-game units and VIP status using Bitcoin Lightning Network payments via LNbits with Fiat/BTC pricing and comprehensive protection features")]
     public class Orangemart : CovalencePlugin
     {
@@ -25,6 +25,7 @@ namespace Oxide.Plugins
             public const string Discord = "Discord";
             public const string InvoiceSettings = "InvoiceSettings";
             public const string VIPSettings = "VIPSettings";
+            public const string ExternalApi = "ExternalApi"; // NEW
         }
 
         private static class ConfigKeys
@@ -32,6 +33,7 @@ namespace Oxide.Plugins
             // Commands
             public const string BuyCurrencyCommandName = "BuyCurrencyCommandName";
             public const string SendCurrencyCommandName = "SendCurrencyCommandName";
+            public const string BankCommandName = "BankCommandName";
             public const string BuyVipCommandName = "BuyVipCommandName";
 
             // CurrencySettings
@@ -68,12 +70,17 @@ namespace Oxide.Plugins
             public const string VipPrice = "VipPrice";
             public const string VipPriceCurrency = "VipPriceCurrency"; 
             public const string VipCommand = "VipCommand";
+
+            // ExternalApi
+            public const string AddressLookupApiUrl = "AddressLookupApiUrl";
+            public const string AddressLookupApiKey = "AddressLookupApiKey";
         }
 
         // Configuration variables
         private int currencyItemID;
         private string buyCurrencyCommandName;
         private string sendCurrencyCommandName;
+        private string bankCommandName;
         private string buyVipCommandName;
         private double vipPrice; 
         private string vipPriceCurrency; 
@@ -92,6 +99,8 @@ namespace Oxide.Plugins
         private int webSocketReconnectDelay;
         private List<string> blacklistedDomains = new List<string>();
         private List<string> whitelistedDomains = new List<string>();
+        private string addressLookupApiUrl; // NEW
+        private string addressLookupApiKey; // NEW
         
         // Protection and rate limiting variables
         private int maxPurchaseAmount;
@@ -102,12 +111,12 @@ namespace Oxide.Plugins
 
         private const string SellLogFile = "Orangemart/send_bitcoin.json";
         private const string BuyInvoiceLogFile = "Orangemart/buy_invoices.json";
-        private const string OfflineQueueFile = "Orangemart/offline_rewards.json"; // NEW
+        private const string OfflineQueueFile = "Orangemart/offline_rewards.json"; 
         
         private LNbitsConfig config;
         private List<PendingInvoice> pendingInvoices = new List<PendingInvoice>();
         private Dictionary<string, int> retryCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        private Dictionary<string, int> offlineCurrencyQueue = new Dictionary<string, int>(); // NEW
+        private Dictionary<string, int> offlineCurrencyQueue = new Dictionary<string, int>(); 
         
         // WebSocket tracking
         private Dictionary<string, WebSocketConnection> activeWebSockets = new Dictionary<string, WebSocketConnection>();
@@ -126,6 +135,15 @@ namespace Oxide.Plugins
             public const string FAILED = "FAILED";
             public const string EXPIRED = "EXPIRED";
             public const string REFUNDED = "REFUNDED";
+        }
+
+        // External API Response Model
+        private class AddressLookupResponse
+        {
+            [JsonProperty("lightningAddress")]
+            public string LightningAddress { get; set; }
+            [JsonProperty("error")]
+            public string Error { get; set; }
         }
 
         // Price Fetching Models
@@ -291,6 +309,10 @@ namespace Oxide.Plugins
                     GetConfigValue(ConfigSections.Discord, ConfigKeys.DiscordWebhookUrl, "https://discord.com/api/webhooks/your_webhook_url", ref configChanged)
                 );
 
+                // External API Settings
+                addressLookupApiUrl = GetConfigValue(ConfigSections.ExternalApi, ConfigKeys.AddressLookupApiUrl, "https://theorangemart.com/api/server/resolve-address", ref configChanged);
+                addressLookupApiKey = GetConfigValue(ConfigSections.ExternalApi, ConfigKeys.AddressLookupApiKey, "your_super_secret_api_key_here", ref configChanged);
+
                 // Currency Settings
                 currencyItemID = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.CurrencyItemID, 1776460938, ref configChanged);
                 currencyName = GetConfigValue(ConfigSections.CurrencySettings, ConfigKeys.CurrencyName, "blood", ref configChanged);
@@ -313,6 +335,7 @@ namespace Oxide.Plugins
                 // Command Names
                 buyCurrencyCommandName = GetConfigValue(ConfigSections.Commands, ConfigKeys.BuyCurrencyCommandName, "buyblood", ref configChanged);
                 sendCurrencyCommandName = GetConfigValue(ConfigSections.Commands, ConfigKeys.SendCurrencyCommandName, "sendblood", ref configChanged);
+                bankCommandName = GetConfigValue(ConfigSections.Commands, ConfigKeys.BankCommandName, "bank", ref configChanged);
                 buyVipCommandName = GetConfigValue(ConfigSections.Commands, ConfigKeys.BuyVipCommandName, "buyvip", ref configChanged);
 
                 // VIP Settings
@@ -394,7 +417,14 @@ namespace Oxide.Plugins
             {
                 [ConfigKeys.BuyCurrencyCommandName] = "buyblood",
                 [ConfigKeys.BuyVipCommandName] = "buyvip",
+                [ConfigKeys.BankCommandName] = "bank",
                 [ConfigKeys.SendCurrencyCommandName] = "sendblood"
+            };
+
+            Config[ConfigSections.ExternalApi] = new Dictionary<string, object>
+            {
+                [ConfigKeys.AddressLookupApiUrl] = "https://theorangemart.com/api/server/resolve-address",
+                [ConfigKeys.AddressLookupApiKey] = "your_super_secret_api_key_here"
             };
 
             Config[ConfigSections.CurrencySettings] = new Dictionary<string, object>
@@ -454,10 +484,11 @@ namespace Oxide.Plugins
                 return;
             }
 
-            LoadOfflineQueue(); // Load pending items on startup
+            LoadOfflineQueue(); 
 
             AddCovalenceCommand(buyCurrencyCommandName, nameof(CmdBuyCurrency), "orangemart.buycurrency");
             AddCovalenceCommand(sendCurrencyCommandName, nameof(CmdSendCurrency), "orangemart.sendcurrency");
+            AddCovalenceCommand(bankCommandName, nameof(CmdBank), "orangemart.sendcurrency");
             AddCovalenceCommand(buyVipCommandName, nameof(CmdBuyVip), "orangemart.buyvip");
 
             RecoverInterruptedTransactions();
@@ -471,7 +502,7 @@ namespace Oxide.Plugins
         private void Unload()
         {
             CleanupAllWebSockets();
-            SaveOfflineQueue(); // Save pending items on shutdown/reload
+            SaveOfflineQueue(); 
             pendingInvoices.Clear();
             retryCounts.Clear();
             lastCommandTime.Clear();
@@ -676,7 +707,7 @@ namespace Oxide.Plugins
         {
             lang.RegisterMessages(new Dictionary<string, string>
             {
-                ["UsageSendCurrency"] = "Usage: /{0} <amount> <lightning_address>",
+                ["UsageSendCurrency"] = "Usage: /{0} <amount> [optional_lightning_address]",
                 ["NeedMoreCurrency"] = "You need more {0}. You currently have {1}.",
                 ["FailedToReserveCurrency"] = "Failed to reserve currency. Please try again.",
                 ["FailedToQueryLightningAddress"] = "Failed to query Lightning address for an invoice.",
@@ -706,7 +737,9 @@ namespace Oxide.Plugins
                 ["TooManyPendingInvoices"] = "You have {0} pending invoices (max: {1}).",
                 ["VipPriceTooHigh"] = "VIP price is configured too high.",
                 ["ProtectionLimits"] = "Orangemart Limits: Purchase max {0}, Send max {1}, Cooldown {2}s",
-                ["FailedToFetchPrice"] = "Failed to fetch live exchange rate. Please try again."
+                ["FailedToFetchPrice"] = "Failed to fetch live exchange rate. Please try again.",
+                ["ApiNotConfigured"] = "The server has not configured an automatic address lookup. Usage: /{0} <amount> <lightning_address>",
+                ["FailedToResolveAddressApi"] = "Could not find your linked Lightning Address ({0}). Please link one at theorangemart.com or provide an address manually."
             }, this);
         }
 
@@ -996,13 +1029,53 @@ namespace Oxide.Plugins
             });
         }
 
+        private void FetchPlayerLightningAddress(string steamId, Action<string, string> callback)
+        {
+            if (string.IsNullOrEmpty(addressLookupApiUrl))
+            {
+                callback(null, "API not configured");
+                return;
+            }
+
+            string url = $"{addressLookupApiUrl}?steamId={steamId}";
+            var headers = new Dictionary<string, string>();
+            
+            if (!string.IsNullOrEmpty(addressLookupApiKey))
+            {
+                headers["Authorization"] = $"Bearer {addressLookupApiKey}";
+            }
+
+            MakeWebRequest(url, null, (code, response) =>
+            {
+                if (code == 200 && !string.IsNullOrEmpty(response))
+                {
+                    try
+                    {
+                        var data = JsonConvert.DeserializeObject<AddressLookupResponse>(response);
+                        if (data != null && !string.IsNullOrEmpty(data.LightningAddress))
+                        {
+                            callback(data.LightningAddress, null);
+                            return;
+                        }
+                        if (data != null && !string.IsNullOrEmpty(data.Error))
+                        {
+                            callback(null, data.Error);
+                            return;
+                        }
+                    }
+                    catch { }
+                }
+                callback(null, "Server returned invalid response or player not found.");
+            }, RequestMethod.GET, headers);
+        }
+
         private void CmdSendCurrency(IPlayer player, string command, string[] args)
         {
             if (!player.HasPermission("orangemart.sendcurrency")) { player.Reply(Lang("NoPermission", player.Id)); return; }
             if (IsOnCooldown(player, "send")) return;
             if (HasTooManyPendingInvoices(player)) return;
 
-            if (args.Length != 2 || !int.TryParse(args[0], out int amount))
+            if (args.Length < 1 || args.Length > 2 || !int.TryParse(args[0], out int amount))
             {
                 player.Reply(Lang("UsageSendCurrency", player.Id, sendCurrencyCommandName));
                 return;
@@ -1010,7 +1083,36 @@ namespace Oxide.Plugins
 
             if (!ValidateSendAmount(player, amount, out int satsAmount)) return;
 
-            string lightningAddress = args[1];
+            if (args.Length == 2)
+            {
+                // Explicit address provided
+                ProcessSendCurrency(player, amount, satsAmount, args[1]);
+            }
+            else
+            {
+                // Auto-lookup via API
+                if (string.IsNullOrEmpty(addressLookupApiUrl))
+                {
+                    player.Reply(Lang("ApiNotConfigured", player.Id, sendCurrencyCommandName));
+                    return;
+                }
+
+                player.Reply("Looking up your linked Lightning Address...");
+                FetchPlayerLightningAddress(GetPlayerId(player), (resolvedAddress, error) =>
+                {
+                    if (string.IsNullOrEmpty(resolvedAddress))
+                    {
+                        player.Reply(Lang("FailedToResolveAddressApi", player.Id, error));
+                        return;
+                    }
+                    
+                    ProcessSendCurrency(player, amount, satsAmount, resolvedAddress);
+                });
+            }
+        }
+
+        private void ProcessSendCurrency(IPlayer player, int amount, int satsAmount, string lightningAddress)
+        {
             if (!IsLightningAddressAllowed(lightningAddress))
             {
                 player.Reply(Lang("BlacklistedDomain", player.Id, GetDomainFromLightningAddress(lightningAddress)));
@@ -1020,6 +1122,7 @@ namespace Oxide.Plugins
             var basePlayer = player.Object as BasePlayer;
             if (basePlayer == null) return;
 
+            // We only take the currency AFTER we know they have a valid destination
             if (!TryTakeCurrency(basePlayer, amount))
             {
                 player.Reply(Lang("NeedMoreCurrency", player.Id, currencyName, amount));
@@ -1051,7 +1154,7 @@ namespace Oxide.Plugins
                         TransactionId = transactionId,
                         RHash = paymentHash.ToLower(),
                         Player = player,
-                        Amount = satsAmount,
+                        Amount = satsAmount, // Keep this as satsAmount based on your previous logic
                         SatsAmount = satsAmount,
                         Memo = $"Sending {amount} {currencyName} to {lightningAddress}",
                         CreatedAt = DateTime.UtcNow,
@@ -1084,6 +1187,56 @@ namespace Oxide.Plugins
                     // Offline safe refund
                     ReturnCurrency(GetPlayerId(player), amount);
                 }
+            });
+        }
+
+        private void CmdBank(IPlayer player, string command, string[] args)
+        {
+            if (!player.HasPermission("orangemart.sendcurrency")) { player.Reply(Lang("NoPermission", player.Id)); return; }
+            if (IsOnCooldown(player, "send")) return;
+            if (HasTooManyPendingInvoices(player)) return;
+
+            var basePlayer = player.Object as BasePlayer;
+            if (basePlayer == null) return;
+
+            // 1. Calculate the total amount of currency in the player's inventory
+            int amountToBank = basePlayer.inventory.GetAmount(currencyItemID);
+
+            if (amountToBank <= 0)
+            {
+                player.Reply($"You do not have any {currencyName} in your inventory to bank.");
+                return;
+            }
+
+            // 2. Cap it at the maximum allowed send limit if they have too much
+            if (maxSendAmount > 0 && amountToBank > maxSendAmount)
+            {
+                amountToBank = maxSendAmount;
+                player.Reply($"Capping bank deposit to the maximum allowed limit: {maxSendAmount} {currencyName}.");
+            }
+
+            // 3. Validate the final amount to get the sats math
+            if (!ValidateSendAmount(player, amountToBank, out int satsAmount)) return;
+
+            // 4. Require the API lookup
+            if (string.IsNullOrEmpty(addressLookupApiUrl))
+            {
+                player.Reply("The server has not configured an automatic address lookup. Please use /sendblood <amount> <address> instead.");
+                return;
+            }
+
+            player.Reply($"Looking up your linked Lightning Address to bank {amountToBank} {currencyName}...");
+            
+            // 5. Fetch the address and process the payout
+            FetchPlayerLightningAddress(GetPlayerId(player), (resolvedAddress, error) =>
+            {
+                if (string.IsNullOrEmpty(resolvedAddress))
+                {
+                    player.Reply(Lang("FailedToResolveAddressApi", player.Id, error));
+                    return;
+                }
+                
+                ProcessSendCurrency(player, amountToBank, satsAmount, resolvedAddress);
             });
         }
 
