@@ -1,7 +1,7 @@
 /*
 ================================================================================================
   ScrapLeaderboard
-  Version: 2.4.2
+  Version: 2.4.3
   Author: Orangemart
 ================================================================================================
 
@@ -40,7 +40,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ScrapLeaderboard", "Orangemart", "2.4.2")]
+    [Info("ScrapLeaderboard", "Orangemart", "2.4.3")]
     [Description("Handles scrap deposits, enforces limits, and updates the ServerInfo leaderboard.")]
     public class ScrapLeaderboard : CovalencePlugin
     {
@@ -359,22 +359,32 @@ namespace Oxide.Plugins
             var summary = new Dictionary<string, object>();
             var claims = new Dictionary<string, int>();
             var csvBuilder = new StringBuilder();
-            csvBuilder.AppendLine("steamid,total_deposited,percentage,sats_reward");
+            
+            // 1. UPDATED: Added 'name' to the CSV header
+            csvBuilder.AppendLine("steamid,name,total_deposited,percentage,sats_reward");
 
             foreach (var entry in playerTotalsCache)
             {
                 double percentage = totalDeposits > 0 ? (double)entry.Value / totalDeposits : 0;
                 int reward = (int)Math.Round(percentage * prizePool);
 
+                // 2. UPDATED: Fetch the player's Steam name. 
+                // We strip out any commas or quotes from their name so it doesn't accidentally break the CSV columns!
+                string playerName = covalence.Players.FindPlayerById(entry.Key)?.Name ?? entry.Key;
+                playerName = playerName.Replace(",", "").Replace("\"", "'");
+
                 summary[entry.Key] = new
                 {
+                    name = playerName, // Added to the JSON summary as well for good measure
                     total_deposited = entry.Value,
                     percentage = percentage * 100,
                     sats_reward = reward
                 };
 
                 claims[entry.Key] = reward;
-                csvBuilder.AppendLine($"{entry.Key},{entry.Value},{(percentage * 100).ToString("F2", CultureInfo.InvariantCulture)},{reward}");
+                
+                // 3. UPDATED: Inserted {playerName} into the CSV row builder
+                csvBuilder.AppendLine($"{entry.Key},{playerName},{entry.Value},{(percentage * 100).ToString("F2", CultureInfo.InvariantCulture)},{reward}");
             }
 
             string dirPath = Interface.Oxide.DataDirectory + $"/{DataFolder}";
