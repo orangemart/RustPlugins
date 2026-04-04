@@ -1,13 +1,16 @@
 /*
 ================================================================================================
   ScrapLeaderboard
-  Version: 2.4.3
+  Version: 2.5.1
   Author: Orangemart
 ================================================================================================
 
   OVERVIEW:
   This plugin handles scrap deposits, enforces real-time limits, logs transactions, 
   and updates the ServerInfo leaderboard automatically.
+  UPDATES v2.5.0
+  - ADDED: Native CUI in-game leaderboard (/leaderboard or /topscrap)
+
   UPDATES v2.4.1
   - perf: optimize data saving and prevent chat message spam
 
@@ -36,11 +39,12 @@ using Newtonsoft.Json.Linq;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
+using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ScrapLeaderboard", "Orangemart", "2.4.3")]
+    [Info("ScrapLeaderboard", "Orangemart", "2.5.2")]
     [Description("Handles scrap deposits, enforces limits, and updates the ServerInfo leaderboard.")]
     public class ScrapLeaderboard : CovalencePlugin
     {
@@ -59,6 +63,7 @@ namespace Oxide.Plugins
         private const string ServerInfoPath = "oxide/config/ServerInfo.json";
         private const string PermPlace = "scrapleaderboard.place";
         private const string PermAdmin = "scrapleaderboard.admin";
+        private const string UIPanelName = "ScrapLeaderboardUI";
         
         // Data Paths
         private const string DataFolder = "ScrapLeaderboard";
@@ -175,6 +180,134 @@ namespace Oxide.Plugins
                 SaveConfig();
                 Puts("Configuration file updated with new options.");
             }
+        }
+
+        // ==========================================================================
+        // UI Methods
+        // ==========================================================================
+        [Command("leaderboard", "topscrap")]
+        private void CmdShowLeaderboard(IPlayer player, string command, string[] args)
+        {
+            var rustPlayer = player.Object as BasePlayer;
+            if (rustPlayer == null) return;
+
+            DrawLeaderboardUI(rustPlayer);
+        }
+
+        [Command("leaderboard_close")]
+        private void CmdCloseLeaderboard(IPlayer player, string command, string[] args)
+        {
+            var rustPlayer = player.Object as BasePlayer;
+            if (rustPlayer == null) return;
+            
+            CuiHelper.DestroyUi(rustPlayer, UIPanelName);
+        }
+
+        private void DrawLeaderboardUI(BasePlayer player)
+        {
+            CuiHelper.DestroyUi(player, UIPanelName);
+
+            var elements = new CuiElementContainer();
+
+            // Widened panel for two columns
+            elements.Add(new CuiPanel
+            {
+                Image = { Color = "0.1 0.1 0.1 0.85", Material = "assets/content/ui/uibackgroundblur-ingamemenu.mat" },
+                RectTransform = { AnchorMin = "0.15 0.05", AnchorMax = "0.85 0.9" },
+                CursorEnabled = true
+            }, "Overlay", UIPanelName);
+
+            // Title
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "🏆 Top Scrap Depositors", FontSize = 24, Align = TextAnchor.MiddleCenter },
+                RectTransform = { AnchorMin = "0 0.92", AnchorMax = "1 0.98" }
+            }, UIPanelName);
+
+            // Close Button
+            elements.Add(new CuiButton
+            {
+                Button = { Command = "leaderboard_close", Color = "0.8 0.2 0.2 0.8" },
+                RectTransform = { AnchorMin = "0.95 0.92", AnchorMax = "0.99 0.98" },
+                Text = { Text = "X", FontSize = 18, Align = TextAnchor.MiddleCenter }
+            }, UIPanelName);
+
+            // Subtle Vertical Center Divider
+            elements.Add(new CuiPanel
+            {
+                Image = { Color = "0.5 0.5 0.5 0.15" },
+                RectTransform = { AnchorMin = "0.5 0.12", AnchorMax = "0.502 0.89" }
+            }, UIPanelName);
+
+            long totalDeposited = playerTotalsCache.Values.Sum();
+            
+            var sortedPlayers = playerTotalsCache
+                .OrderByDescending(kv => kv.Value)
+                .ToList();
+
+            // Increased from Top 20 to Top 40 for the two-column layout
+            var topPlayers = sortedPlayers.Take(40).ToList();
+
+            int itemsPerColumn = 20;
+            float yStart = 0.88f;
+            float step = 0.038f;
+            
+            float currentY = yStart;
+
+            for (int i = 0; i < topPlayers.Count; i++)
+            {
+                bool isRightColumn = i >= itemsPerColumn;
+
+                if (i == itemsPerColumn)
+                {
+                    currentY = yStart; // Reset for right column
+                }
+
+                string minX = isRightColumn ? "0.52" : "0.03";
+                string maxX = isRightColumn ? "0.98" : "0.48";
+
+                var kv = topPlayers[i];
+                string steamId = kv.Key;
+                string name = covalence.Players.FindPlayerById(steamId)?.Name ?? steamId;
+                int deposited = kv.Value;
+                double percentage = totalDeposited > 0 ? (double)deposited / totalDeposited * 100 : 0;
+
+                string color = i switch
+                {
+                    0 => "<color=#FFD700>", // Gold
+                    1 => "<color=#C0C0C0>", // Silver
+                    2 => "<color=#CD7F32>", // Bronze
+                    _ => "<color=#FFFFFF>"
+                };
+
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = $"{color}{i + 1}. {name}</color> - {deposited:N0} ({percentage:F2}%)", FontSize = 15, Align = TextAnchor.MiddleLeft },
+                    RectTransform = { AnchorMin = $"{minX} {currentY - 0.03f}", AnchorMax = $"{maxX} {currentY}" }
+                }, UIPanelName);
+
+                currentY -= step;
+            }
+
+            // Player's Own Rank Calculator
+            int myRank = sortedPlayers.FindIndex(kv => kv.Key == player.UserIDString) + 1;
+            int myTotal = myRank > 0 ? sortedPlayers[myRank - 1].Value : 0;
+            string myRankText = myRank > 0 ? $"Your Rank: #{myRank} ({myTotal:N0} scrap)" : "Your Rank: Unranked (0 scrap)";
+
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = myRankText, FontSize = 16, Align = TextAnchor.MiddleCenter, Color = "0.6 0.8 1 1" },
+                RectTransform = { AnchorMin = "0 0.06", AnchorMax = "1 0.12" }
+            }, UIPanelName);
+
+            // Total Server Deposits
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = $"Total Server Deposits: {totalDeposited:N0} scrap", FontSize = 14, Align = TextAnchor.MiddleCenter, Color = "0.7 0.7 0.7 1" },
+                RectTransform = { AnchorMin = "0 0.01", AnchorMax = "1 0.05" }
+            }, UIPanelName);
+
+            CuiHelper.AddUi(player, elements);
         }
 
         // ==========================================================================

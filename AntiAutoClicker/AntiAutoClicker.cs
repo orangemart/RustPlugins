@@ -6,7 +6,7 @@ using System.Collections.Generic;
 
 namespace Oxide.Plugins
 {
-    [Info("AntiAutoClicker", "Orangemart", "1.6.2")]
+    [Info("AntiAutoClicker", "Orangemart", "1.6.3")]
     [Description("Teleports or kicks players who AFK near select NPC vendors or vending machines with a nearby marker prefab.")]
     public class AntiAutoClicker : RustPlugin
     {
@@ -148,7 +148,7 @@ namespace Oxide.Plugins
         if (isNear)
         {
             detectedCount++;
-            PrintWarning($"[DEBUG] {player.displayName} is within range of a monitored area.");
+            // PrintWarning($"[DEBUG] {player.displayName} is within range of a monitored area.");
 
             if (!playerAfkTimers.ContainsKey(player.userID))
             {
@@ -177,7 +177,7 @@ namespace Oxide.Plugins
         }
     }
 
-    PrintWarning($"[DEBUG] AntiAutoClicker scan complete. Players near monitored areas: {detectedCount}");
+    // PrintWarning($"[DEBUG] AntiAutoClicker scan complete. Players near monitored areas: {detectedCount}");
 }
 
         private bool IsNearMonitoredItem(BasePlayer player)
