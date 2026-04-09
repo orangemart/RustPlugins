@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StudyBuddy", "Orangemart", "1.0.1")]
+    [Info("StudyBuddy", "Orangemart", "1.0.2")]
     [Description("A lightweight blueprint sharing plugin that allows online teammates to copy your homework and unlock blueprints")]
     class StudyBuddy : RustPlugin
     {
@@ -39,10 +39,10 @@ namespace Oxide.Plugins
         }
 
         // Hook: Tech Tree
-        private void OnTechTreeNodeUnlock(Workbench workbench, TechTreeData.NodeInstance node, BasePlayer player)
+        private void OnTechTreeNodeUnlocked(Workbench workbench, ItemDefinition itemDef, BasePlayer player)
         {
-            if (!config.TechTreeSharingEnabled || node == null || player == null) return;
-            TryShareBlueprint(node.itemDef, player);
+            if (!config.TechTreeSharingEnabled || itemDef == null || player == null) return;
+            TryShareBlueprint(itemDef, player);
         }
 
         #endregion
