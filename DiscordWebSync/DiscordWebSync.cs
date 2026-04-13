@@ -3,19 +3,15 @@ using Oxide.Core;
 using Oxide.Core.Database;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
-using Oxide.Ext.Discord.Entities;
 using System;
 using System.Collections.Generic;
 
 namespace Oxide.Plugins
 {
-    [Info("Discord Web Sync", "Orangemart", "1.0.3")]
+    [Info("Discord Web Sync", "Orangemart", "1.0.5")]
     [Description("Syncs DiscordAuth links to a central MySQL database asyncronously")]
     public class DiscordWebSync : CovalencePlugin
     {
-        [PluginReference]
-        private Plugin DiscordAuth;
-
         private Configuration _config;
         private readonly Oxide.Core.MySql.Libraries.MySql _mySql = Interface.Oxide.GetLibrary<Oxide.Core.MySql.Libraries.MySql>();
         private Oxide.Core.Database.Connection _dbConnection;
@@ -73,7 +69,6 @@ namespace Oxide.Plugins
                                                 discord_id VARCHAR(50) NOT NULL
                                               );");
                 
-                // The delegate callback forces this to run on a background thread, preventing server crashes.
                 _mySql.ExecuteNonQuery(sql, _dbConnection, delegate(int rows) 
                 {
                     Puts("Successfully connected to MySQL and verified table structure in the background.");
@@ -96,19 +91,28 @@ namespace Oxide.Plugins
 
         #region Hooks (Real-Time Sync)
         [HookMethod("OnDiscordPlayerLinked")]
-        private void OnDiscordPlayerLinked(IPlayer player, DiscordUser user)
+        private void OnDiscordPlayerLinked(IPlayer player, string discordId)
         {
+            // Note: Updated this hook to accept a string to avoid complex Discord extension object requirements
             if (_dbConnection == null) return;
-            Sql sql = Sql.Builder.Append("REPLACE INTO discord_web_links (steam_id, discord_id) VALUES (@0, @1);", player.Id, user.Id.ToString());
+            Sql sql = Sql.Builder.Append("REPLACE INTO discord_web_links (steam_id, discord_id) VALUES (@0, @1);", player.Id, discordId);
             _mySql.Insert(sql, _dbConnection, delegate(int rows) { });
         }
 
         [HookMethod("OnDiscordPlayerUnlinked")]
-        private void OnDiscordPlayerUnlinked(IPlayer player, DiscordUser user)
+        private void OnDiscordPlayerUnlinked(IPlayer player, string discordId)
         {
             if (_dbConnection == null) return;
             Sql sql = Sql.Builder.Append("DELETE FROM discord_web_links WHERE steam_id = @0;", player.Id);
             _mySql.Delete(sql, _dbConnection, delegate(int rows) { });
+        }
+        #endregion
+
+        #region Data Mapping for Force Sync
+        // This perfectly matches the structure of oxide/data/DiscordAuth.json
+        private class DiscordAuthData
+        {
+            public Dictionary<string, string> Players = new Dictionary<string, string>();
         }
         #endregion
 
@@ -118,24 +122,19 @@ namespace Oxide.Plugins
         {
             if (!player.IsAdmin) return;
 
-            if (DiscordAuth == null)
-            {
-                player.Reply("DiscordAuth plugin is not loaded!");
-                return;
-            }
+            // Read the JSON file directly from the hard drive, completely bypassing cross-plugin Call issues
+            var data = Interface.Oxide.DataFileSystem.ReadObject<DiscordAuthData>("DiscordAuth");
 
-            var links = DiscordAuth.Call("GetPlayerIdToDiscordIds") as System.Collections.IDictionary;
-            
-            if (links == null || links.Count == 0)
+            if (data == null || data.Players == null || data.Players.Count == 0)
             {
-                player.Reply("No links found in DiscordAuth to sync.");
+                player.Reply("No links found in the DiscordAuth JSON file to sync.");
                 return;
             }
 
             int count = 0;
-            foreach (System.Collections.DictionaryEntry link in links)
+            foreach (var link in data.Players)
             {
-                Sql sql = Sql.Builder.Append("REPLACE INTO discord_web_links (steam_id, discord_id) VALUES (@0, @1);", link.Key.ToString(), link.Value.ToString());
+                Sql sql = Sql.Builder.Append("REPLACE INTO discord_web_links (steam_id, discord_id) VALUES (@0, @1);", link.Key, link.Value);
                 _mySql.Insert(sql, _dbConnection, delegate(int rows) { });
                 count++;
             }
