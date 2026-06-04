@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CommandList", "Orangemart", "1.1.5")]
+    [Info("CommandList", "Orangemart", "1.1.6")]
     [Description("Displays a clean UI list of server commands and descriptions in two columns.")]
     public class CommandList : CovalencePlugin
     {
@@ -119,16 +119,18 @@ namespace Oxide.Plugins
                 string minX = isRightColumn ? "0.52" : "0.03";
                 string maxX = isRightColumn ? "0.98" : "0.48";
 
-                // Adjusted bounds: Command gets a tight box, description gets a deeper box for 2 lines
+                // Adjusted bounds to fit within the 0.070f block step
                 float cmdYMax = currentY;
-                float cmdYMin = currentY - 0.025f; 
+                float cmdYMin = currentY - 0.035f; // Increased height to prevent Unity from truncating the text
                 float descYMax = cmdYMin; 
-                float descYMin = currentY - 0.078f; 
+                float descYMin = currentY - 0.070f; // Fits perfectly into the new tighter blockStep
 
                 // Command Name
                 elements.Add(new CuiLabel
                 {
-                    Text = { Text = $"<color=#5eb0f9>{kvp.Key}</color>", FontSize = 14, Align = TextAnchor.LowerLeft },
+                    // Removed the rich text <color> tag to prevent < > parsing errors.
+                    // Used the native Color property instead (RGB converted from #5eb0f9).
+                    Text = { Text = kvp.Key, FontSize = 14, Align = TextAnchor.LowerLeft, Color = "0.37 0.69 0.98 1" },
                     RectTransform = { AnchorMin = $"{minX} {cmdYMin}", AnchorMax = $"{maxX} {cmdYMax}" }
                 }, UIPanelName);
 
