@@ -8,8 +8,8 @@ using System.Collections.Generic;
 
 namespace Oxide.Plugins
 {
-    [Info("Group Web Sync", "Orangemart", "1.1.0")]
-    [Description("Syncs Oxide groups and player rewards to a central MySQL database")]
+    [Info("Group Web Sync", "Orangemart", "1.2.0")]
+    [Description("Syncs Oxide groups, player rewards, and Discord linkages to a central MySQL database")]
     public class GroupWebSync : CovalencePlugin
     {
         private Configuration _config;
@@ -81,11 +81,19 @@ namespace Oxide.Plugins
                                                 total_amount BIGINT NOT NULL,
                                                 PRIMARY KEY (steam_id, server_name)
                                               );");
+
+                // New Player Discord Mappings Table
+                Sql discordSql = Sql.Builder.Append(@"CREATE TABLE IF NOT EXISTS player_discord (
+                                                steam_id VARCHAR(50) NOT NULL PRIMARY KEY,
+                                                discord_id VARCHAR(50) NOT NULL
+                                              );");
                 
                 _mySql.ExecuteNonQuery(groupSql, _dbConnection, delegate(int rows) { });
-                _mySql.ExecuteNonQuery(rewardSql, _dbConnection, delegate(int rows) 
+                _mySql.ExecuteNonQuery(rewardSql, _dbConnection, delegate(int rows) { });
+                _mySql.ExecuteNonQuery(discordSql, _dbConnection, delegate(int rows) 
                 {
-                    Puts("Successfully connected to MySQL and verified both table structures.");
+                    Puts("Successfully connected to MySQL and verified database structures.");
+                    SyncDiscordLinks();
                 });
             }
             catch (Exception ex)
@@ -201,6 +209,60 @@ namespace Oxide.Plugins
             }
 
             player.Reply($"Aggregated and queued {count} player reward totals for asynchronous sync to MySQL.");
+        }
+        #endregion
+
+        #region Discord Sync Logic
+        private class DiscordAuthData
+        {
+            [JsonProperty("Players")]
+            public Dictionary<string, string> Players = new Dictionary<string, string>();
+        }
+
+        private void SyncDiscordLinks()
+        {
+            if (_dbConnection == null) return;
+
+            try
+            {
+                // Read the JSON file from /oxide/data/DiscordAuth.json
+                var data = Interface.Oxide.DataFileSystem.ReadObject<DiscordAuthData>("DiscordAuth");
+                if (data == null || data.Players == null || data.Players.Count == 0)
+                {
+                    Puts("No Discord authentication links found in DiscordAuth.json to sync.");
+                    return;
+                }
+
+                int count = 0;
+                foreach (var kvp in data.Players)
+                {
+                    if (string.IsNullOrEmpty(kvp.Key) || string.IsNullOrEmpty(kvp.Value)) continue;
+
+                    Sql sql = Sql.Builder.Append("REPLACE INTO player_discord (steam_id, discord_id) VALUES (@0, @1);", kvp.Key, kvp.Value);
+                    _mySql.Insert(sql, _dbConnection, delegate(int rows) { });
+                    count++;
+                }
+
+                Puts($"Successfully synced {count} Discord linkages from DiscordAuth.json to MySQL.");
+            }
+            catch (Exception ex)
+            {
+                PrintError($"Failed to sync Discord links: {ex.Message}");
+            }
+        }
+
+        [Command("discordsync.force")]
+        private void ForceDiscordSyncCommand(IPlayer player, string command, string[] args)
+        {
+            if (!player.IsAdmin) return;
+            if (_dbConnection == null)
+            {
+                player.Reply("Database connection is offline.");
+                return;
+            }
+
+            SyncDiscordLinks();
+            player.Reply("Triggered manual sync of Discord linkages from DiscordAuth.json to MySQL.");
         }
         #endregion
     }
