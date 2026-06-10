@@ -1321,7 +1321,7 @@ namespace Oxide.Plugins
 
             foreach (var item in collected)
             {
-                bool success = player.GiveItem(item);
+                bool success = player.inventory.GiveItem(item);
                 if (!success && item.amount > 0) item.Drop(player.transform.position + new UnityEngine.Vector3(0f, 1.5f, 0f), UnityEngine.Vector3.zero);
             }
             return false;
@@ -1553,7 +1553,7 @@ namespace Oxide.Plugins
             {
                 if (currencySkinID > 0) currencyItem.skin = currencySkinID;
                 
-                bool success = basePlayer.GiveItem(currencyItem);
+                bool success = basePlayer.inventory.GiveItem(currencyItem);
 
                 if (!success)
                 {
@@ -1593,7 +1593,7 @@ namespace Oxide.Plugins
             {
                 if (currencySkinID > 0) returnedCurrency.skin = currencySkinID;
                 
-                bool success = basePlayer.GiveItem(returnedCurrency);
+                bool success = basePlayer.inventory.GiveItem(returnedCurrency);
                 
                 if (!success && returnedCurrency.amount > 0)
                 {
