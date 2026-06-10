@@ -13,7 +13,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Orangemart", "RustySats Orangemart", "0.7.0")]
+    [Info("Orangemart", "RustySats Orangemart", "0.7.1")]
     [Description("Allows players to buy and sell in-game units and VIP status using Bitcoin Lightning Network payments via LNbits with Fiat/BTC pricing and comprehensive protection features")]
     public class Orangemart : CovalencePlugin
     {
@@ -1321,8 +1321,8 @@ namespace Oxide.Plugins
 
             foreach (var item in collected)
             {
-                player.GiveItem(item);
-                if (item.parent == null) item.Drop(player.transform.position + new UnityEngine.Vector3(0f, 1.5f, 0f), UnityEngine.Vector3.zero);
+                bool success = player.GiveItem(item);
+                if (!success && item.amount > 0) item.Drop(player.transform.position + new UnityEngine.Vector3(0f, 1.5f, 0f), UnityEngine.Vector3.zero);
             }
             return false;
         }
@@ -1553,11 +1553,14 @@ namespace Oxide.Plugins
             {
                 if (currencySkinID > 0) currencyItem.skin = currencySkinID;
                 
-                basePlayer.GiveItem(currencyItem);
+                bool success = basePlayer.GiveItem(currencyItem);
 
-                if (currencyItem.parent == null)
+                if (!success)
                 {
-                    currencyItem.Drop(basePlayer.transform.position + new UnityEngine.Vector3(0f, 1.5f, 0f), UnityEngine.Vector3.zero);
+                    if (currencyItem.amount > 0)
+                    {
+                        currencyItem.Drop(basePlayer.transform.position + new UnityEngine.Vector3(0f, 1.5f, 0f), UnityEngine.Vector3.zero);
+                    }
                     player.Reply($"Inventory full! {amount} {currencyName} dropped on ground.");
                 }
                 else 
@@ -1590,9 +1593,9 @@ namespace Oxide.Plugins
             {
                 if (currencySkinID > 0) returnedCurrency.skin = currencySkinID;
                 
-                basePlayer.GiveItem(returnedCurrency);
+                bool success = basePlayer.GiveItem(returnedCurrency);
                 
-                if (returnedCurrency.parent == null)
+                if (!success && returnedCurrency.amount > 0)
                 {
                     returnedCurrency.Drop(basePlayer.transform.position + new UnityEngine.Vector3(0f, 1.5f, 0f), UnityEngine.Vector3.zero);
                 }
