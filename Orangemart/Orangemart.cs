@@ -13,7 +13,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Orangemart", "RustySats Orangemart", "0.7.1")]
+    [Info("Orangemart", "RustySats Orangemart", "0.7.2")]
     [Description("Allows players to buy and sell in-game units and VIP status using Bitcoin Lightning Network payments via LNbits with Fiat/BTC pricing and comprehensive protection features")]
     public class Orangemart : CovalencePlugin
     {
