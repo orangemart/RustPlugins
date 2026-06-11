@@ -59,8 +59,8 @@ The configuration file allows you to set connection details, pricing, and securi
     "BuyVipCommandName": "buyvip"
   },
   "ExternalApi": {
-    "AddressLookupApiUrl": "https://theorangemart.com/api/server/resolve-address",
-    "AddressLookupApiKey": "your_super_secret_api_key_here"
+    "AddressLookupApiUrl": "https://yourwalletsite.com/api/server/resolve-address",
+    "AddressLookupApiKey": "your_wallet_api_key"
   },
   "CurrencySettings": {
     "CurrencyItemID": 1776460938,
