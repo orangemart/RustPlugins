@@ -44,7 +44,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("ScrapLeaderboard", "Orangemart", "2.5.2")]
+    [Info("ScrapLeaderboard", "Orangemart", "2.5.3")]
     [Description("Handles scrap deposits, enforces limits, and updates the ServerInfo leaderboard.")]
     public class ScrapLeaderboard : CovalencePlugin
     {
@@ -78,6 +78,12 @@ namespace Oxide.Plugins
         public Dictionary<string, int> playerTotalsCache = new Dictionary<string, int>();
 		public Dictionary<string, float> lastLimitMessageTime = new Dictionary<string, float>();
         public static ScrapLeaderboard instance;
+
+        [HookMethod("GetPlayerTotalsCache")]
+        private Dictionary<string, int> GetPlayerTotalsCache()
+        {
+            return playerTotalsCache;
+        }
 
         // ==========================================================================
         // Oxide Hooks
