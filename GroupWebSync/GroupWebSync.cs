@@ -8,13 +8,16 @@ using System.Collections.Generic;
 
 namespace Oxide.Plugins
 {
-    [Info("Group Web Sync", "Orangemart", "1.2.0")]
-    [Description("Syncs Oxide groups, player rewards, and Discord linkages to a central MySQL database")]
+    [Info("Group Web Sync", "Orangemart", "1.3.1")]
+    [Description("Syncs Oxide groups, player rewards, Discord linkages, and scrap leaderboards to a central MySQL database")]
     public class GroupWebSync : CovalencePlugin
     {
         private Configuration _config;
         private readonly Oxide.Core.MySql.Libraries.MySql _mySql = Interface.Oxide.GetLibrary<Oxide.Core.MySql.Libraries.MySql>();
         private Oxide.Core.Database.Connection _dbConnection;
+
+        [PluginReference]
+        private Plugin ScrapLeaderboard;
 
         #region Configuration
         private class Configuration
@@ -87,13 +90,26 @@ namespace Oxide.Plugins
                                                 steam_id VARCHAR(50) NOT NULL PRIMARY KEY,
                                                 discord_id VARCHAR(50) NOT NULL
                                               );");
+
+                // New Scrap Leaderboard Table
+                Sql scrapSql = Sql.Builder.Append(@"CREATE TABLE IF NOT EXISTS player_scrap (
+                                                steam_id VARCHAR(50) NOT NULL,
+                                                server_name VARCHAR(50) NOT NULL,
+                                                total_deposited INT NOT NULL,
+                                                PRIMARY KEY (steam_id, server_name)
+                                              );");
                 
                 _mySql.ExecuteNonQuery(groupSql, _dbConnection, delegate(int rows) { });
                 _mySql.ExecuteNonQuery(rewardSql, _dbConnection, delegate(int rows) { });
+                _mySql.ExecuteNonQuery(scrapSql, _dbConnection, delegate(int rows) { });
                 _mySql.ExecuteNonQuery(discordSql, _dbConnection, delegate(int rows) 
                 {
                     Puts("Successfully connected to MySQL and verified database structures.");
                     SyncDiscordLinks();
+                    
+                    // Sync scrap totals initially, then every 5 minutes (300 seconds)
+                    timer.Once(10f, () => SyncScrapTotals());
+                    timer.Every(300f, () => SyncScrapTotals());
                 });
             }
             catch (Exception ex)
@@ -108,6 +124,11 @@ namespace Oxide.Plugins
             {
                 _mySql.CloseDb(_dbConnection);
             }
+        }
+
+        private void OnServerSave()
+        {
+            SyncScrapTotals();
         }
         #endregion
 
@@ -263,6 +284,51 @@ namespace Oxide.Plugins
 
             SyncDiscordLinks();
             player.Reply("Triggered manual sync of Discord linkages from DiscordAuth.json to MySQL.");
+        }
+        #endregion
+
+        #region Scrap Sync Logic
+        private void SyncScrapTotals()
+        {
+            if (_dbConnection == null) return;
+            if (ScrapLeaderboard == null || !ScrapLeaderboard.IsLoaded)
+            {
+                Puts("ScrapLeaderboard plugin is not loaded. Skipping scrap sync.");
+                return;
+            }
+
+            var cache = ScrapLeaderboard.Call("GetPlayerTotalsCache") as Dictionary<string, int>;
+            if (cache == null || cache.Count == 0)
+            {
+                Puts("No scrap deposits found in ScrapLeaderboard to sync.");
+                return;
+            }
+
+            int count = 0;
+            foreach (var kvp in cache)
+            {
+                if (string.IsNullOrEmpty(kvp.Key)) continue;
+
+                Sql sql = Sql.Builder.Append("REPLACE INTO player_scrap (steam_id, server_name, total_deposited) VALUES (@0, @1, @2);", kvp.Key, _config.ServerName, kvp.Value);
+                _mySql.Insert(sql, _dbConnection, delegate(int rows) { });
+                count++;
+            }
+
+            Puts($"Successfully synced {count} scrap deposit totals to MySQL.");
+        }
+
+        [Command("scrapsync.force")]
+        private void ForceScrapSyncCommand(IPlayer player, string command, string[] args)
+        {
+            if (!player.IsAdmin) return;
+            if (_dbConnection == null)
+            {
+                player.Reply("Database connection is offline.");
+                return;
+            }
+
+            SyncScrapTotals();
+            player.Reply("Triggered manual sync of scrap leaderboards to MySQL.");
         }
         #endregion
     }
