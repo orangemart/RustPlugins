@@ -6,24 +6,27 @@ using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Plugins;
 using Oxide.Core.Libraries.Covalence;
+using Oxide.Game.Rust;
+using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "2.0.8")]
+    [Info("Team Skins", "Orangemart", "2.1.5")]
     [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
         [PluginReference] private Plugin PlayerDLCAPI;
 
         private const string PermUse = "teamskins.use";
+        private const string UIPanelName = "teamskins.pagination";
         
         // --- Cache Data ---
         private readonly Dictionary<string, List<ulong>> _autoSkinCache = new Dictionary<string, List<ulong>>();
         private readonly Dictionary<string, List<SkinConfigEntry>> _manualSkinCache = new Dictionary<string, List<SkinConfigEntry>>();
-
         private readonly Dictionary<ulong, ItemContainer> _openContainers = new Dictionary<ulong, ItemContainer>();
         private readonly HashSet<ulong> _openingPlayers = new HashSet<ulong>();
+        private readonly Dictionary<ulong, int> _playerPages = new Dictionary<ulong, int>();
 
         // --- Configuration ---
         private PluginConfig _config;
@@ -161,7 +164,11 @@ namespace Oxide.Plugins
                 var player = BasePlayer.FindByID(kvp.Key);
                 if (kvp.Value != null)
                 {
-                    if (player != null) player.GiveItem(kvp.Value.GetSlot(0));
+                    if (player != null)
+                    {
+                        player.GiveItem(kvp.Value.GetSlot(0));
+                        DestroyPaginationUI(player);
+                    }
                     kvp.Value.Kill();
                 }
             }
@@ -263,6 +270,7 @@ namespace Oxide.Plugins
 
                     container.Kill();
                     _openContainers.Remove(player.userID);
+                    DestroyPaginationUI(player);
                 }
             }
         }
@@ -284,6 +292,9 @@ namespace Oxide.Plugins
                         SafeRemoveItem(ghost);
                     }
                 }
+                
+                var player = BasePlayer.FindByID(ownerId);
+                if (player != null) DestroyPaginationUI(player);
             }
         }
 
@@ -294,6 +305,7 @@ namespace Oxide.Plugins
 
             if (item.position == 0)
             {
+                _playerPages[ownerId] = 0; // Reset pagination
                 var player = BasePlayer.FindByID(ownerId);
                 if (player != null) NextFrame(() => DisplaySkins(player, container, item));
             }
@@ -301,14 +313,11 @@ namespace Oxide.Plugins
 
         private void DisplaySkins(BasePlayer player, ItemContainer container, Item targetItem)
         {
-            // Clear existing ghosts first safely
+            // Clear existing ghosts safely
             for (int i = 1; i < container.capacity; i++)
             {
                 var ghost = container.GetSlot(i);
-                if (ghost != null) 
-                { 
-                    SafeRemoveItem(ghost); 
-                }
+                if (ghost != null) SafeRemoveItem(ghost);
             }
 
             var baseDef = GetBaseItemDef(targetItem.info);
@@ -317,21 +326,36 @@ namespace Oxide.Plugins
             if (skins.Count == 0)
             {
                 player.ChatMessage("No skins found for this item.");
+                DestroyPaginationUI(player);
                 return;
             }
 
-            int slot = 1;
-            foreach (var skinId in skins)
+            // Get current page
+            if (!_playerPages.TryGetValue(player.userID, out int currentPage))
+                currentPage = 0;
+
+            // Slot 0 is item. Rest of slots are for skin previews.
+            int maxSkinsPerPage = container.capacity - 1; 
+            int startIndex = currentPage * maxSkinsPerPage;
+
+            // Safety fallback
+            if (startIndex >= skins.Count) 
             {
-                if (slot >= container.capacity) break;
-                
+                currentPage = 0;
+                _playerPages[player.userID] = 0;
+                startIndex = 0;
+            }
+
+            int slot = 1;
+            for (int i = startIndex; i < skins.Count && slot <= maxSkinsPerPage; i++)
+            {
+                var skinId = skins[i];
                 Item ghost = ItemManager.Create(baseDef, 1, skinId);
                 if (ghost != null)
                 {
                     ghost.condition = targetItem.condition;
                     ghost.maxCondition = targetItem.maxCondition;
                     
-                    // --- AMMO EXPLOIT FIX ---
                     var projectile = ghost.GetHeldEntity() as BaseProjectile;
                     if (projectile != null && projectile.primaryMagazine != null)
                     {
@@ -341,6 +365,17 @@ namespace Oxide.Plugins
                     ghost.MoveToContainer(container, slot);
                     slot++;
                 }
+            }
+
+            // Draw CUI pagination buttons
+            int totalPages = Mathf.CeilToInt((float)skins.Count / maxSkinsPerPage);
+            if (totalPages > 1)
+            {
+                DrawPaginationUI(player, currentPage, totalPages);
+            }
+            else
+            {
+                DestroyPaginationUI(player);
             }
         }
 
@@ -353,6 +388,7 @@ namespace Oxide.Plugins
             if (item.parent == box && item.position > 0)
             {
                 var originalItem = box.GetSlot(0);
+                
                 if (originalItem != null)
                 {
                     bool isRedirect = item.info.shortname != originalItem.info.shortname;
@@ -398,6 +434,122 @@ namespace Oxide.Plugins
             if (targetContainer == box.uid && targetSlot > 0) return false;
 
             return null;
+        }
+
+        [ConsoleCommand("teamskins.page")]
+        private void CmdConsolePage(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Connection?.player as BasePlayer;
+            if (player == null) return;
+
+            ItemContainer box;
+            if (!_openContainers.TryGetValue(player.userID, out box) || box == null)
+                return;
+
+            var originalItem = box.GetSlot(0);
+            if (originalItem == null || !originalItem.IsValid())
+                return;
+
+            if (arg.Args == null || arg.Args.Length == 0) return;
+
+            string action = arg.Args[0].ToString().ToLower();
+            if (action == "next")
+            {
+                if (!_playerPages.ContainsKey(player.userID)) _playerPages[player.userID] = 0;
+                _playerPages[player.userID]++;
+            }
+            else if (action == "prev")
+            {
+                if (_playerPages.TryGetValue(player.userID, out int page) && page > 0)
+                {
+                    _playerPages[player.userID] = page - 1;
+                }
+            }
+
+            DisplaySkins(player, box, originalItem);
+        }
+
+        private void DestroyPaginationUI(BasePlayer player)
+        {
+            if (player != null)
+            {
+                CuiHelper.DestroyUi(player, UIPanelName);
+            }
+        }
+
+        private void DrawPaginationUI(BasePlayer player, int currentPage, int totalPages)
+        {
+            CuiHelper.DestroyUi(player, UIPanelName);
+
+            var elements = new CuiElementContainer();
+
+            // Main Background Panel - Shifted to the right to expose the LOOT header
+            elements.Add(new CuiPanel
+            {
+                Image = { Color = "0.08 0.08 0.08 0.9", Material = "assets/content/ui/uibackgroundblur-ingamemenu.mat" },
+                RectTransform = { AnchorMin = "0.71 0.70", AnchorMax = "0.85 0.745" },
+                CursorEnabled = false
+            }, "Overlay", UIPanelName);
+
+            // Previous Button
+            if (currentPage > 0)
+            {
+                elements.Add(new CuiButton
+                {
+                    Button = { Command = "teamskins.page prev", Color = "0.2 0.2 0.2 0.9" },
+                    RectTransform = { AnchorMin = "0.02 0.12", AnchorMax = "0.32 0.88" },
+                    Text = { Text = "◀ PREV", FontSize = 9, Align = TextAnchor.MiddleCenter, Color = "0.9 0.9 0.9 1" }
+                }, UIPanelName);
+            }
+            else
+            {
+                elements.Add(new CuiPanel
+                {
+                    Image = { Color = "0.15 0.15 0.15 0.4" },
+                    RectTransform = { AnchorMin = "0.02 0.12", AnchorMax = "0.32 0.88" }
+                }, UIPanelName);
+                
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = "◀ PREV", FontSize = 9, Align = TextAnchor.MiddleCenter, Color = "0.4 0.4 0.4 1" },
+                    RectTransform = { AnchorMin = "0.02 0.12", AnchorMax = "0.32 0.88" }
+                }, UIPanelName);
+            }
+
+            // Page Indicator Label
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = $"PAGE {currentPage + 1} / {totalPages}", FontSize = 9, Align = TextAnchor.MiddleCenter, Color = "0.75 0.75 0.75 1" },
+                RectTransform = { AnchorMin = "0.34 0.0", AnchorMax = "0.66 1.0" }
+            }, UIPanelName);
+
+            // Next Button
+            if (currentPage < totalPages - 1)
+            {
+                elements.Add(new CuiButton
+                {
+                    Button = { Command = "teamskins.page next", Color = "0.2 0.2 0.2 0.9" },
+                    RectTransform = { AnchorMin = "0.68 0.12", AnchorMax = "0.98 0.88" },
+                    Text = { Text = "NEXT ▶", FontSize = 9, Align = TextAnchor.MiddleCenter, Color = "0.9 0.9 0.9 1" }
+                }, UIPanelName);
+            }
+            else
+            {
+                elements.Add(new CuiPanel
+                {
+                    Image = { Color = "0.15 0.15 0.15 0.4" },
+                    RectTransform = { AnchorMin = "0.68 0.12", AnchorMax = "0.98 0.88" }
+                }, UIPanelName);
+                
+                elements.Add(new CuiLabel
+                {
+                    Text = { Text = "NEXT ▶", FontSize = 9, Align = TextAnchor.MiddleCenter, Color = "0.4 0.4 0.4 1" },
+                    RectTransform = { AnchorMin = "0.68 0.12", AnchorMax = "0.98 0.88" }
+                }, UIPanelName);
+            }
+
+            CuiHelper.AddUi(player, elements);
+
         }
 
         // --- SPLITTING EXPLOIT FIX ---
