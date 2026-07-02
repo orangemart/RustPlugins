@@ -13,7 +13,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Orangemart", "RustySats Orangemart", "0.7.2")]
+    [Info("Orangemart", "RustySats Orangemart", "0.7.3")]
     [Description("Allows players to buy and sell in-game units and VIP status using Bitcoin Lightning Network payments via LNbits with Fiat/BTC pricing and comprehensive protection features")]
     public class Orangemart : CovalencePlugin
     {
@@ -474,6 +474,7 @@ namespace Oxide.Plugins
             permission.RegisterPermission("orangemart.buycurrency", this);
             permission.RegisterPermission("orangemart.sendcurrency", this);
             permission.RegisterPermission("orangemart.buyvip", this);
+            permission.RegisterPermission("orangemart.admin", this);
         }
 
         private void OnServerInitialized()
@@ -490,6 +491,7 @@ namespace Oxide.Plugins
             AddCovalenceCommand(sendCurrencyCommandName, nameof(CmdSendCurrency), "orangemart.sendcurrency");
             AddCovalenceCommand(bankCommandName, nameof(CmdBank), "orangemart.sendcurrency");
             AddCovalenceCommand(buyVipCommandName, nameof(CmdBuyVip), "orangemart.buyvip");
+            AddCovalenceCommand("giveblood", nameof(CmdGiveBlood), "orangemart.admin");
 
             RecoverInterruptedTransactions();
 
@@ -1067,6 +1069,39 @@ namespace Oxide.Plugins
                 }
                 callback(null, "Server returned invalid response or player not found.");
             }, RequestMethod.GET, headers);
+        }
+
+        private void CmdGiveBlood(IPlayer player, string command, string[] args)
+        {
+            if (player != null && !player.IsServer && !player.HasPermission("orangemart.admin"))
+            {
+                player.Reply(Lang("NoPermission", player.Id));
+                return;
+            }
+
+            if (args.Length != 2)
+            {
+                player.Reply("Usage: giveblood <steam_id> <amount>");
+                return;
+            }
+
+            string steamId = args[0];
+            if (!int.TryParse(args[1], out int amount) || amount <= 0)
+            {
+                player.Reply("Invalid amount. Must be a positive integer.");
+                return;
+            }
+
+            IPlayer targetPlayer = players.FindPlayerById(steamId);
+            if (targetPlayer == null)
+            {
+                AddOfflineCurrency(steamId, amount);
+                player.Reply($"Player '{steamId}' not found in database. Queued {amount} {currencyName} to offline queue.");
+                return;
+            }
+
+            RewardPlayer(targetPlayer, amount);
+            player.Reply($"Successfully rewarded {targetPlayer.Name} ({steamId}) with {amount} {currencyName}.");
         }
 
         private void CmdSendCurrency(IPlayer player, string command, string[] args)
