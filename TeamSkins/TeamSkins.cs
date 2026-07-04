@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "2.1.5")]
+    [Info("Team Skins", "Orangemart", "2.1.6")]
     [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
@@ -237,7 +237,7 @@ namespace Oxide.Plugins
             player.inventory.loot.AddContainer(container);
             player.inventory.loot.SendImmediate();
             
-            player.ClientRPCPlayer(null, player, "RPC_OpenLootPanel", _config.PanelName);
+            player.ClientRPC(RpcTarget.Player("RPC_OpenLootPanel", player), _config.PanelName);
             timer.In(1.0f, () => _openingPlayers.Remove(player.userID));
         }
 
