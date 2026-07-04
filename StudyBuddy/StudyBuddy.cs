@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StudyBuddy", "Orangemart", "1.0.2")]
+    [Info("StudyBuddy", "Orangemart", "1.0.3")]
     [Description("A lightweight blueprint sharing plugin that allows online teammates to copy your homework and unlock blueprints")]
     class StudyBuddy : RustPlugin
     {
@@ -31,6 +31,11 @@ namespace Oxide.Plugins
             permission.RegisterPermission(usePermission, this);
         }
 
+        private void OnServerInitialized()
+        {
+            Puts($"StudyBuddy has been initialized and is ready! TechTreeSharingEnabled: {config?.TechTreeSharingEnabled}");
+        }
+
         // Hook: Research Table
         private void OnItemAction(Item item, string action, BasePlayer player)
         {
@@ -38,10 +43,61 @@ namespace Oxide.Plugins
             TryShareBlueprint(item.blueprintTargetDef, player);
         }
 
-        // Hook: Tech Tree
-        private void OnTechTreeNodeUnlocked(Workbench workbench, ItemDefinition itemDef, BasePlayer player)
+        // Hook: Tech Tree (Pre-Unlock)
+        private void OnTechTreeNodeUnlock(Workbench workbench, object nodeOrItemDef, BasePlayer player)
         {
-            if (!config.TechTreeSharingEnabled || itemDef == null || player == null) return;
+            HandleTechTreeUnlock(nodeOrItemDef, player);
+        }
+
+        // Hook: Tech Tree (Post-Unlock)
+        private void OnTechTreeNodeUnlocked(Workbench workbench, object nodeOrItemDef, BasePlayer player)
+        {
+            HandleTechTreeUnlock(nodeOrItemDef, player);
+        }
+
+        private void HandleTechTreeUnlock(object nodeOrItemDef, BasePlayer player)
+        {
+            if (nodeOrItemDef == null || player == null || !config.TechTreeSharingEnabled) return;
+
+            ItemDefinition itemDef = nodeOrItemDef as ItemDefinition;
+            if (itemDef == null)
+            {
+                // Reflection to extract ItemDefinition from the node
+                var fields = nodeOrItemDef.GetType().GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                foreach (var field in fields)
+                {
+                    if (field.FieldType == typeof(ItemDefinition))
+                    {
+                        itemDef = field.GetValue(nodeOrItemDef) as ItemDefinition;
+                        if (itemDef != null)
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                if (itemDef == null)
+                {
+                    var props = nodeOrItemDef.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    foreach (var prop in props)
+                    {
+                        if (prop.PropertyType == typeof(ItemDefinition))
+                        {
+                            itemDef = prop.GetValue(nodeOrItemDef) as ItemDefinition;
+                            if (itemDef != null)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (itemDef == null)
+            {
+                return;
+            }
+
             TryShareBlueprint(itemDef, player);
         }
 
@@ -52,14 +108,54 @@ namespace Oxide.Plugins
         private void TryShareBlueprint(ItemDefinition itemDef, BasePlayer sharer)
         {
             if (itemDef == null || sharer == null) return;
-            if (!permission.UserHasPermission(sharer.UserIDString, usePermission)) return;
-            if (config.BlockedItems.Contains(itemDef.shortname)) return;
+
+            if (!permission.UserHasPermission(sharer.UserIDString, usePermission))
+            {
+                return;
+            }
+
+            if (config.BlockedItems.Contains(itemDef.shortname))
+            {
+                return;
+            }
+
+            var targets = new HashSet<ulong>();
 
             // 1. Get Team Members
             var team = RelationshipManager.ServerInstance.FindPlayersTeam(sharer.userID);
-            if (team == null || team.members.Count <= 1) return;
+            if (team != null)
+            {
+                foreach (ulong memberId in team.members)
+                {
+                    if (memberId != sharer.userID)
+                    {
+                        targets.Add(memberId);
+                    }
+                }
+            }
 
-            // 2. Identify Blueprint IDs (Main item + any sub-items)
+            // 2. Get Clan Members (Official Clan System)
+            if (sharer.clanId != 0 && ClanManager.ServerInstance != null)
+            {
+                IClan clan = null;
+                if (ClanManager.ServerInstance.Backend?.TryGet(sharer.clanId, out clan) ?? false)
+                {
+                    if (clan != null && clan.Members != null)
+                    {
+                        foreach (ClanMember member in clan.Members)
+                        {
+                            if (member.SteamId != sharer.userID)
+                            {
+                                targets.Add(member.SteamId);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (targets.Count == 0) return;
+
+            // 3. Identify Blueprint IDs (Main item + any sub-items)
             var blueprintsToShare = new List<int> { itemDef.itemid };
             if (itemDef.Blueprint?.additionalUnlocks != null)
             {
@@ -69,16 +165,10 @@ namespace Oxide.Plugins
 
             int sharedCount = 0;
 
-            // 3. Loop through team members
-            foreach (ulong targetId in team.members)
+            // 4. Loop through targets
+            foreach (ulong targetId in targets)
             {
-                if (targetId == sharer.userID) continue;
-
-                // STRICT PERFORMANCE CHECK:
-                // We only look for players currently in memory (online).
-                // We do not touch the disk for offline players.
                 BasePlayer onlinePlayer = RelationshipManager.FindByID(targetId);
-
                 if (onlinePlayer != null && onlinePlayer.IsConnected)
                 {
                     if (UnlockForOnlinePlayer(onlinePlayer, blueprintsToShare))
@@ -97,8 +187,6 @@ namespace Oxide.Plugins
 
         private bool UnlockForOnlinePlayer(BasePlayer player, List<int> blueprintIds)
         {
-            // Because the player is online, their data is already in RAM.
-            // This operation is purely memory manipulation. Zero Disk I/O.
             var playerInfo = player.PersistantPlayerInfo;
             if (playerInfo == null) return false;
 
@@ -122,7 +210,6 @@ namespace Oxide.Plugins
 
             if (learnedSomething)
             {
-                // Sync the changes to the network so the server acknowledges them
                 player.SendNetworkUpdateImmediate();
                 return true;
             }
