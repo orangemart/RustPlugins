@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("StudyBuddy", "Orangemart", "1.0.7")]
+    [Info("StudyBuddy", "Orangemart", "1.1.1")]
     [Description("A lightweight blueprint sharing plugin that allows online teammates to copy your homework and unlock blueprints")]
     class StudyBuddy : RustPlugin
     {
@@ -101,13 +101,14 @@ namespace Oxide.Plugins
             List<ItemDefinition> prerequisites = new List<ItemDefinition>();
             if (workbench != null)
             {
-                object techTree = GetTechTree(workbench);
-                if (techTree != null)
+                var techTrees = GetTechTrees(workbench);
+                foreach (var techTree in techTrees)
                 {
                     object nodeInstance = FindNodeInstance(techTree, itemDef);
                     if (nodeInstance != null)
                     {
                         AddParentsFromNode(nodeInstance, techTree, new HashSet<object>(), prerequisites);
+                        break;
                     }
                 }
             }
@@ -125,34 +126,72 @@ namespace Oxide.Plugins
             });
         }
 
-        private object GetTechTree(object workbench)
+        private List<object> GetTechTrees(object workbench)
         {
-            if (workbench == null) return null;
-            var field = workbench.GetType().GetField("techTree", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                        ?? workbench.GetType().GetField("TechTree", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            if (field != null) return field.GetValue(workbench);
+            var list = new List<object>();
+            if (workbench == null) return list;
 
-            var prop = workbench.GetType().GetProperty("techTree", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                       ?? workbench.GetType().GetProperty("TechTree", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            if (prop != null) return prop.GetValue(workbench);
+            // Try to get "techTrees" array first
+            var techTreesField = workbench.GetType().GetField("techTrees", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                                 ?? workbench.GetType().GetField("TechTrees", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            if (techTreesField != null)
+            {
+                var val = techTreesField.GetValue(workbench);
+                if (val is System.Collections.IEnumerable enumerable)
+                {
+                    foreach (var tree in enumerable)
+                    {
+                        if (tree != null)
+                        {
+                            list.Add(tree);
+                        }
+                    }
+                }
+            }
 
-            return null;
+            // Fallback to single "techTree" field/property
+            if (list.Count == 0)
+            {
+                var field = workbench.GetType().GetField("techTree", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                            ?? workbench.GetType().GetField("TechTree", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (field != null)
+                {
+                    var val = field.GetValue(workbench);
+                    if (val != null) list.Add(val);
+                }
+                else
+                {
+                    var prop = workbench.GetType().GetProperty("techTree", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                               ?? workbench.GetType().GetProperty("TechTree", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (prop != null)
+                    {
+                        var val = prop.GetValue(workbench);
+                        if (val != null) list.Add(val);
+                    }
+                }
+            }
+
+            return list;
         }
 
         private object FindNodeInstance(object techTree, ItemDefinition itemDef)
         {
             if (techTree == null || itemDef == null) return null;
 
-            var nodesField = techTree.GetType().GetField("nodes", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var nodesField = techTree.GetType().GetField("nodes", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                             ?? techTree.GetType().GetField("Nodes", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
             if (nodesField == null) return null;
 
             var nodesEnumerable = nodesField.GetValue(techTree) as System.Collections.IEnumerable;
             if (nodesEnumerable == null) return null;
 
+            int count = 0;
             foreach (object node in nodesEnumerable)
             {
                 if (node == null) continue;
-                if (GetItemDefFromNode(node) == itemDef)
+                count++;
+                var nodeItem = GetItemDefFromNode(node);
+                if (nodeItem == itemDef)
                 {
                     return node;
                 }
@@ -218,123 +257,48 @@ namespace Oxide.Plugins
         {
             if (node == null || techTree == null || !visitedNodes.Add(node)) return;
 
-            var nodesField = techTree.GetType().GetField("nodes", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var nodesField = techTree.GetType().GetField("nodes", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                             ?? techTree.GetType().GetField("Nodes", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
             System.Collections.IEnumerable allNodes = null;
             if (nodesField != null)
             {
                 allNodes = nodesField.GetValue(techTree) as System.Collections.IEnumerable;
             }
 
-            var fields = node.GetType().GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            foreach (var field in fields)
+            var inputsField = node.GetType().GetField("inputs", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                              ?? node.GetType().GetField("Inputs", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+            System.Collections.IEnumerable inputsEnumerable = null;
+            if (inputsField != null)
             {
-                if (field.FieldType == typeof(ItemDefinition) || field.FieldType == typeof(int) || field.Name.Equals("id", System.StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                if (typeof(System.Collections.IEnumerable).IsAssignableFrom(field.FieldType))
+                inputsEnumerable = inputsField.GetValue(node) as System.Collections.IEnumerable;
+            }
+            else
+            {
+                var inputsProp = node.GetType().GetProperty("inputs", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                                 ?? node.GetType().GetProperty("Inputs", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (inputsProp != null)
                 {
-                    var val = field.GetValue(node);
-                    if (val == null || val is string) continue;
-
-                    if (val is System.Collections.IEnumerable enumerable)
-                    {
-                        foreach (var item in enumerable)
-                        {
-                            if (item is int parentId)
-                            {
-                                object parentNode = FindNodeById(allNodes, parentId);
-                                if (parentNode != null)
-                                {
-                                    ItemDefinition parentItem = GetItemDefFromNode(parentNode);
-                                    if (parentItem != null && !result.Contains(parentItem))
-                                    {
-                                        result.Add(parentItem);
-                                    }
-                                    AddParentsFromNode(parentNode, techTree, visitedNodes, result);
-                                }
-                            }
-                            else if (item != null && item.GetType() == node.GetType())
-                            {
-                                ItemDefinition parentItem = GetItemDefFromNode(item);
-                                if (parentItem != null && !result.Contains(parentItem))
-                                {
-                                    result.Add(parentItem);
-                                }
-                                AddParentsFromNode(item, techTree, visitedNodes, result);
-                            }
-                        }
-                    }
-                }
-                else if (field.FieldType == node.GetType())
-                {
-                    var val = field.GetValue(node);
-                    if (val != null)
-                    {
-                        ItemDefinition parentItem = GetItemDefFromNode(val);
-                        if (parentItem != null && !result.Contains(parentItem))
-                        {
-                            result.Add(parentItem);
-                        }
-                        AddParentsFromNode(val, techTree, visitedNodes, result);
-                    }
+                    inputsEnumerable = inputsProp.GetValue(node) as System.Collections.IEnumerable;
                 }
             }
 
-            var props = node.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            foreach (var prop in props)
+            if (inputsEnumerable != null)
             {
-                if (prop.PropertyType == typeof(ItemDefinition) || prop.PropertyType == typeof(int) || prop.Name.Equals("id", System.StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                if (prop.GetIndexParameters().Length > 0) continue;
-
-                if (typeof(System.Collections.IEnumerable).IsAssignableFrom(prop.PropertyType))
+                foreach (var item in inputsEnumerable)
                 {
-                    object val = null;
-                    try { val = prop.GetValue(node); } catch {}
-                    if (val == null || val is string) continue;
-
-                    if (val is System.Collections.IEnumerable enumerable)
+                    if (item is int parentId)
                     {
-                        foreach (var item in enumerable)
+                        object parentNode = FindNodeById(allNodes, parentId);
+                        if (parentNode != null)
                         {
-                            if (item is int parentId)
+                            ItemDefinition parentItem = GetItemDefFromNode(parentNode);
+                            if (parentItem != null && !result.Contains(parentItem))
                             {
-                                object parentNode = FindNodeById(allNodes, parentId);
-                                if (parentNode != null)
-                                {
-                                    ItemDefinition parentItem = GetItemDefFromNode(parentNode);
-                                    if (parentItem != null && !result.Contains(parentItem))
-                                    {
-                                        result.Add(parentItem);
-                                    }
-                                    AddParentsFromNode(parentNode, techTree, visitedNodes, result);
-                                }
+                                result.Add(parentItem);
                             }
-                            else if (item != null && item.GetType() == node.GetType())
-                            {
-                                ItemDefinition parentItem = GetItemDefFromNode(item);
-                                if (parentItem != null && !result.Contains(parentItem))
-                                {
-                                    result.Add(parentItem);
-                                }
-                                AddParentsFromNode(item, techTree, visitedNodes, result);
-                            }
+                            AddParentsFromNode(parentNode, techTree, visitedNodes, result);
                         }
-                    }
-                }
-                else if (prop.PropertyType == node.GetType())
-                {
-                    object val = null;
-                    try { val = prop.GetValue(node); } catch {}
-                    if (val != null)
-                    {
-                        ItemDefinition parentItem = GetItemDefFromNode(val);
-                        if (parentItem != null && !result.Contains(parentItem))
-                        {
-                            result.Add(parentItem);
-                        }
-                        AddParentsFromNode(val, techTree, visitedNodes, result);
                     }
                 }
             }
@@ -431,7 +395,7 @@ namespace Oxide.Plugins
                 }
             }
 
-            int sharedCount = 0;
+            int sharedPlayersCount = 0;
 
             // 4. Loop through targets
             foreach (ulong targetId in targets)
@@ -439,26 +403,51 @@ namespace Oxide.Plugins
                 BasePlayer onlinePlayer = RelationshipManager.FindByID(targetId);
                 if (onlinePlayer != null && onlinePlayer.IsConnected)
                 {
-                    if (UnlockForOnlinePlayer(onlinePlayer, blueprintsToShare))
+                    var learned = UnlockForOnlinePlayer(onlinePlayer, blueprintsToShare);
+                    if (learned.Count > 0)
                     {
-                        sharedCount++;
-                        Message(onlinePlayer, $"<color=#ffff00>{sharer.displayName}</color> shared {itemDef.displayName.translated} with you.");
+                        sharedPlayersCount++;
+                        if (learned.Count == 1)
+                        {
+                            Message(onlinePlayer, $"<color=#ffff00>{sharer.displayName}</color> shared {learned[0].displayName.translated} with you.");
+                        }
+                        else
+                        {
+                            bool learnedMain = learned.Any(i => i.itemid == itemDef.itemid);
+                            if (learnedMain)
+                            {
+                                int extraCount = learned.Count - 1;
+                                string extraSuffix = extraCount == 1 ? "prerequisite blueprint" : "prerequisite blueprints";
+                                Message(onlinePlayer, $"<color=#ffff00>{sharer.displayName}</color> shared {itemDef.displayName.translated} (and {extraCount} {extraSuffix}) with you.");
+                            }
+                            else
+                            {
+                                string suffix = learned.Count == 1 ? "prerequisite blueprint" : "prerequisite blueprints";
+                                Message(onlinePlayer, $"<color=#ffff00>{sharer.displayName}</color> shared {learned.Count} {suffix} with you.");
+                            }
+                        }
                     }
                 }
             }
 
-            if (sharedCount > 0)
+            if (sharedPlayersCount > 0)
             {
-               Message(sharer, $"Shared <color=#ffff00>{itemDef.displayName.translated}</color> with {sharedCount} online team mate(s).");
+                if (prerequisites != null && prerequisites.Count > 0)
+                {
+                    Message(sharer, $"Shared <color=#ffff00>{itemDef.displayName.translated}</color> (and prerequisites) with {sharedPlayersCount} online team mate(s).");
+                }
+                else
+                {
+                    Message(sharer, $"Shared <color=#ffff00>{itemDef.displayName.translated}</color> with {sharedPlayersCount} online team mate(s).");
+                }
             }
         }
 
-        private bool UnlockForOnlinePlayer(BasePlayer player, List<int> blueprintIds)
+        private List<ItemDefinition> UnlockForOnlinePlayer(BasePlayer player, List<int> blueprintIds)
         {
+            var learnedList = new List<ItemDefinition>();
             var playerInfo = player.PersistantPlayerInfo;
-            if (playerInfo == null) return false;
-
-            bool learnedSomething = false;
+            if (playerInfo == null) return learnedList;
 
             foreach (int id in blueprintIds)
             {
@@ -472,17 +461,20 @@ namespace Oxide.Plugins
                     // Update stats just for fun
                     player.stats.Add("blueprint_studied", 1);
                     
-                    learnedSomething = true;
+                    var def = ItemManager.FindItemDefinition(id);
+                    if (def != null)
+                    {
+                        learnedList.Add(def);
+                    }
                 }
             }
 
-            if (learnedSomething)
+            if (learnedList.Count > 0)
             {
                 player.SendNetworkUpdateImmediate();
-                return true;
             }
 
-            return false;
+            return learnedList;
         }
 
         #endregion
