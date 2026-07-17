@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Team Skins", "Orangemart", "2.1.6")]
+    [Info("Team Skins", "Orangemart", "2.2.0")]
     [Description("Skin sharing system. Supports Redirects, Team Sharing, and Configurable Skins.")]
     public class TeamSkins : RustPlugin
     {
@@ -27,6 +27,7 @@ namespace Oxide.Plugins
         private readonly Dictionary<ulong, ItemContainer> _openContainers = new Dictionary<ulong, ItemContainer>();
         private readonly HashSet<ulong> _openingPlayers = new HashSet<ulong>();
         private readonly Dictionary<ulong, int> _playerPages = new Dictionary<ulong, int>();
+        private readonly HashSet<ItemId> _ghostItemIds = new HashSet<ItemId>();
 
         // --- Configuration ---
         private PluginConfig _config;
@@ -174,6 +175,7 @@ namespace Oxide.Plugins
             }
             _openContainers.Clear();
             _openingPlayers.Clear();
+            _ghostItemIds.Clear();
         }
 
         #endregion
@@ -267,6 +269,12 @@ namespace Oxide.Plugins
                     
                     // Give back the item in Slot 0 (if it exists)
                     if (item != null) player.GiveItem(item);
+
+                    for (int i = 1; i < container.capacity; i++)
+                    {
+                        var ghost = container.GetSlot(i);
+                        if (ghost != null) _ghostItemIds.Remove(ghost.uid);
+                    }
 
                     container.Kill();
                     _openContainers.Remove(player.userID);
@@ -363,6 +371,7 @@ namespace Oxide.Plugins
                     }
                     
                     ghost.MoveToContainer(container, slot);
+                    _ghostItemIds.Add(ghost.uid);
                     slot++;
                 }
             }
@@ -384,54 +393,70 @@ namespace Oxide.Plugins
             var player = playerLoot.GetComponent<BasePlayer>();
             if (player == null || !_openContainers.TryGetValue(player.userID, out var box)) return null;
 
+            // Block any placement/movement directly into the ghost slots (slots 1 to capacity-1)
+            if (targetContainer == box.uid && targetSlot > 0) return false;
+
             // Interaction: Clicking/Dragging a Skin Ghost
-            if (item.parent == box && item.position > 0)
+            if (_ghostItemIds.Contains(item.uid))
             {
                 var originalItem = box.GetSlot(0);
-                
-                if (originalItem != null)
+                if (originalItem != null && originalItem.IsValid() && originalItem.parent == box)
                 {
                     bool isRedirect = item.info.shortname != originalItem.info.shortname;
+                    ulong skinId = item.skin;
 
                     NextFrame(() =>
                     {
-                        if (originalItem == null || !originalItem.IsValid()) return;
+                        if (player == null || !player.IsConnected) return;
+
+                        ItemContainer activeBox;
+                        if (!_openContainers.TryGetValue(player.userID, out activeBox) || activeBox != box) return;
+
+                        if (originalItem == null || !originalItem.IsValid() || originalItem.parent != box) return;
+                        if (item == null || !item.IsValid() || item.parent != box) return;
 
                         if (isRedirect)
                         {
+                            _ghostItemIds.Remove(item.uid);
                             TransferItemProps(originalItem, item);
-                            player.GiveItem(item);
+                            
+                            ItemContainer target = player.inventory.FindContainer(targetContainer);
+                            if (target == null || !item.MoveToContainer(target, targetSlot))
+                            {
+                                player.GiveItem(item);
+                            }
+                            
                             originalItem.Remove();
                         }
                         else
                         {
-                            originalItem.skin = item.skin;
+                            originalItem.skin = skinId;
                             originalItem.MarkDirty(); 
 
                             var heldEntity = originalItem.GetHeldEntity();
                             if (heldEntity != null)
                             {
-                                heldEntity.skinID = item.skin;
+                                heldEntity.skinID = skinId;
                                 heldEntity.SendNetworkUpdate();
                             }
 
-                            player.GiveItem(originalItem);
+                            ItemContainer target = player.inventory.FindContainer(targetContainer);
+                            if (target == null || !originalItem.MoveToContainer(target, targetSlot))
+                            {
+                                player.GiveItem(originalItem);
+                            }
                         }
 
                         player.ChatMessage($"Skin Applied! ({item.info.displayName.translated})");
                         
-                        // FIX: Force the client to resync its inventory completely.
-                        // This wipes out the fake predicted ghost item that causes the RPC kick.
                         player.inventory.SendSnapshot();
                         
                         if (player.IsConnected) player.EndLooting();
                     });
-
-                    return false; 
                 }
-            }
 
-            if (targetContainer == box.uid && targetSlot > 0) return false;
+                return false; 
+            }
 
             return null;
         }
@@ -553,9 +578,16 @@ namespace Oxide.Plugins
         }
 
         // --- SPLITTING EXPLOIT FIX ---
-        private void OnItemSplit(Item item, int amount)
+        private object OnItemSplit(Item item, int amount)
         {
-            if (item?.parent == null) return;
+            if (item == null) return null;
+
+            if (_ghostItemIds.Contains(item.uid))
+            {
+                return true; // Block splitting ghost items
+            }
+
+            if (item.parent == null) return null;
 
             // Check if the split happened inside one of our skin containers
             if (_openContainers.ContainsValue(item.parent))
@@ -575,12 +607,39 @@ namespace Oxide.Plugins
                     });
                 }
             }
+
+            return null;
+        }
+
+        private void OnItemDropped(Item item, BaseEntity entity)
+        {
+            if (item == null) return;
+            if (_ghostItemIds.Contains(item.uid))
+            {
+                _ghostItemIds.Remove(item.uid);
+                item.Remove();
+                if (entity != null && !entity.IsDestroyed)
+                {
+                    entity.Kill();
+                }
+            }
+        }
+
+        private object OnItemAction(Item item, string action, BasePlayer player)
+        {
+            if (item == null) return null;
+            if (_ghostItemIds.Contains(item.uid))
+            {
+                return true; // Block UI actions (Drop, Split, etc.) on ghost items
+            }
+            return null;
         }
 
         // --- SAFE REMOVE ITEM LOGIC ---
         private void SafeRemoveItem(Item item)
         {
             if (item == null) return;
+            _ghostItemIds.Remove(item.uid);
             item.Remove(); 
         }
 
